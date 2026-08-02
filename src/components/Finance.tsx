@@ -568,7 +568,11 @@ export function Finance({
       if (memberFilter !== "all" && tx.creatorId !== memberFilter) return false;
 
       return true;
-    }).sort((a, b) => b.date.localeCompare(a.date));
+    }).sort((a, b) =>
+      // Ưu tiên ngày giao dịch (mới nhất trước); cùng ngày thì xếp theo thời điểm
+      // ghi (createdAt ISO) để bản ghi vừa thêm luôn nhảy lên đầu danh sách.
+      b.date.localeCompare(a.date) || (b.createdAt || "").localeCompare(a.createdAt || "")
+    );
   }, [transactions, startStr, endStr, searchTerm, categoryFilter, accountFilter, typeFilter, memberFilter]);
 
   // Tổng Thu/Chi/Cân đối của một tập giao dịch (logic thuần ở utils/financePeriod)
@@ -649,7 +653,7 @@ export function Finance({
           { key: "e_wallet", label: t("accounts.e_wallet") }
         ].map(a => ({ label: a.label, amount: accountBalances[a.key] || 0 })),
         transactions: [...periodTx]
-          .sort((a, b) => b.date.localeCompare(a.date))
+          .sort((a, b) => b.date.localeCompare(a.date) || (b.createdAt || "").localeCompare(a.createdAt || ""))
           .map(tx => ({
             date: tx.date,
             type: tx.type as "income" | "expense",
