@@ -200,6 +200,18 @@ export enum ExpenseCategory {
   OTHER = "other"          // Khác
 }
 
+// Hạng mục CHI do NGƯỜI DÙNG tự thêm (Admin quản lý ở Thiết lập → Hệ thống).
+// Các hạng mục mặc định của app nằm trong src/utils/expenseCategories.ts và không
+// lưu ở DB. transaction.category của hạng mục tự thêm lưu chính `id` bên dưới.
+export interface CustomExpenseCategory {
+  id: string;        // "cc_<timestamp>"
+  label: string;     // tên hiển thị, vd "Thú cưng"
+  emoji: string;     // 1 emoji, vd "🐶"
+  color: string;     // key màu trong EXPENSE_CAT_COLORS (orange/violet/…)
+  createdAt: string;
+  updatedAt: string;
+}
+
 export enum AccountType {
   CASH = "cash",         // Tiền mặt
   BANK = "bank",         // Ngân hàng
@@ -580,6 +592,8 @@ export interface FamilyOrganizerDB {
   rewardLedger: RewardPointEntry[];
   rewardItems: RewardItem[];
   budgets: BudgetLimit[];
+  customCategories: CustomExpenseCategory[];
+  hiddenBuiltinCategories: string[];
   recurringBills: RecurringBill[];
   savingsGoals: SavingsGoal[];
   debts: Debt[];

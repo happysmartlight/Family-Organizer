@@ -32,9 +32,14 @@ import {
   Send,
   Calendar,
   Copy,
-  Languages
+  Languages,
+  Eye,
+  EyeOff,
+  Plus,
+  Check
 } from "lucide-react";
-import { User, UserRole, FamilyRelation, FAMILY_RELATION_LABELS, ROLE_LABELS } from "../types.js";
+import { User, UserRole, FamilyRelation, FAMILY_RELATION_LABELS, ROLE_LABELS, CustomExpenseCategory } from "../types.js";
+import { BUILTIN_EXPENSE_CATEGORIES, EXPENSE_CAT_COLOR_KEYS, catColor, resolveCategory } from "../utils/expenseCategories.js";
 import { useModalA11y } from "../hooks/useModalA11y.js";
 import { FancySelect } from "./FancySelect.js";
 import { useTranslation } from "react-i18next";
@@ -101,6 +106,248 @@ interface SettingsProps {
   onSetRewardsEnabled: (enabled: boolean) => Promise<void>;
   rewardApprovalThreshold: number;
   onSetRewardApprovalThreshold: (threshold: number) => Promise<void>;
+  customCategories: CustomExpenseCategory[];
+  hiddenBuiltinCategories: string[];
+  onSaveCustomCategory: (payload: Partial<CustomExpenseCategory>) => Promise<any>;
+  onDeleteCustomCategory: (id: string) => Promise<any>;
+  onSetHiddenCategories: (hidden: string[]) => Promise<any>;
+}
+
+// Bộ biểu tượng gợi ý cho hạng mục CHI — bấm chọn nhanh (vẫn nhập tay được emoji khác).
+// Sắp theo nhóm chi tiêu quen thuộc của gia đình: ăn uống, mua sắm, nhà cửa/hoá đơn,
+// đi lại, sức khoẻ, học hành, con cái/thú cưng, giải trí, tiền bạc.
+const QUICK_EMOJIS = [
+  "🍲", "🍔", "☕", "🛒", "🛍️", "👕", "💄", "🏠",
+  "⚡", "💧", "🌐", "📱", "📺", "🚗", "🛵", "⛽",
+  "✈️", "💊", "🏥", "🦷", "📚", "🎓", "👶", "🧸",
+  "🐶", "🎮", "🎬", "🎁", "💰", "🏦", "💳", "🌸",
+];
+
+// ─── Quản lý hạng mục CHI (chỉ Admin, trong tab Hệ thống) ──────────────────
+// Giữ nguyên các hạng mục MẶC ĐỊNH (chỉ ẩn/hiện), cho phép thêm hạng mục RIÊNG
+// gồm tên + emoji + màu. Dùng chung nguồn màu/nhãn với Tài chính & Tổng quan.
+interface CategoryManagerProps {
+  customCategories: CustomExpenseCategory[];
+  hiddenBuiltinCategories: string[];
+  onSaveCustomCategory: (payload: Partial<CustomExpenseCategory>) => Promise<any>;
+  onDeleteCustomCategory: (id: string) => Promise<any>;
+  onSetHiddenCategories: (hidden: string[]) => Promise<any>;
+  confirm: (opts: { title: string; message: string; confirmLabel?: string; tone?: "danger" | "default" }) => Promise<boolean>;
+}
+
+function CategoryManagerCard({
+  customCategories,
+  hiddenBuiltinCategories,
+  onSaveCustomCategory,
+  onDeleteCustomCategory,
+  onSetHiddenCategories,
+  confirm
+}: CategoryManagerProps) {
+  const [label, setLabel] = useState("");
+  const [emoji, setEmoji] = useState("");
+  const [color, setColor] = useState("orange");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const hidden = new Set(hiddenBuiltinCategories);
+
+  const resetForm = () => { setLabel(""); setEmoji(""); setColor("orange"); setEditingId(null); setErr(""); };
+
+  const startEdit = (c: CustomExpenseCategory) => {
+    setEditingId(c.id); setLabel(c.label); setEmoji(c.emoji || ""); setColor(c.color || "orange"); setErr("");
+  };
+
+  const toggleBuiltin = async (value: string) => {
+    const next = hidden.has(value)
+      ? hiddenBuiltinCategories.filter(v => v !== value)
+      : [...hiddenBuiltinCategories, value];
+    setBusy(true); setErr("");
+    try { await onSetHiddenCategories(next); }
+    catch (e: any) { setErr(e?.message || "Không lưu được"); }
+    finally { setBusy(false); }
+  };
+
+  const submit = async () => {
+    if (!label.trim()) { setErr("Nhập tên hạng mục"); return; }
+    setBusy(true); setErr("");
+    try {
+      await onSaveCustomCategory({ id: editingId || undefined, label: label.trim(), emoji: emoji.trim(), color });
+      resetForm();
+    } catch (e: any) { setErr(e?.message || "Không lưu được"); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async (c: CustomExpenseCategory) => {
+    const ok = await confirm({
+      title: `Xóa hạng mục "${c.label}"?`,
+      message: "Hạng mục này sẽ bị xóa khỏi danh sách chọn. Các giao dịch cũ đã ghi vẫn được giữ lại nhưng sẽ hiển thị dạng nhãn xám.",
+      confirmLabel: "Xóa hạng mục",
+      tone: "danger"
+    });
+    if (!ok) return;
+    setBusy(true); setErr("");
+    try { await onDeleteCustomCategory(c.id); if (editingId === c.id) resetForm(); }
+    catch (e: any) { setErr(e?.message || "Không xóa được"); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="bg-slate-950 neu-pressed-sm rounded-2xl p-4.5 space-y-3">
+      <div className="space-y-0.5">
+        <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+          <Tag className="w-4 h-4 text-amber-400" /> Hạng mục chi phí
+        </h3>
+        <p className="text-[11px] text-slate-500">
+          Bấm để <b className="text-slate-300">ẩn/hiện</b> hạng mục mặc định không dùng, và
+          <b className="text-slate-300"> thêm hạng mục riêng</b> của gia đình (tên + emoji + màu).
+          Danh sách này áp dụng chung khi ghi thu chi.
+        </p>
+      </div>
+
+      {/* Hạng mục MẶC ĐỊNH — chỉ ẩn/hiện, không xóa */}
+      <div className="space-y-1.5">
+        <p className="text-[11px] font-bold text-slate-400">Mặc định của ứng dụng</p>
+        <div className="flex flex-wrap gap-1.5">
+          {BUILTIN_EXPENSE_CATEGORIES.map(b => {
+            const isHidden = hidden.has(b.value);
+            const meta = resolveCategory(b.value, customCategories);
+            return (
+              <button
+                key={b.value}
+                type="button"
+                onClick={() => toggleBuiltin(b.value)}
+                disabled={busy}
+                title={isHidden ? "Đang ẩn — bấm để hiện lại" : "Đang hiện — bấm để ẩn"}
+                className={`flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg neu-flat cursor-pointer transition-all disabled:opacity-50 ${
+                  isHidden ? "bg-slate-900 text-slate-500" : `bg-slate-900 ${catColor(b.color).text}`
+                }`}
+              >
+                <span className="leading-none">{b.emoji}</span>
+                <span className={isHidden ? "line-through" : ""}>{meta.label}</span>
+                {isHidden ? <EyeOff className="w-3 h-3 shrink-0" /> : <Eye className="w-3 h-3 shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Hạng mục RIÊNG của gia đình */}
+      <div className="space-y-1.5 pt-1">
+        <p className="text-[11px] font-bold text-slate-400">Của gia đình ({customCategories.length})</p>
+        {customCategories.length === 0 ? (
+          <p className="text-[11px] text-slate-500 italic">Chưa có hạng mục tự thêm nào.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {customCategories.map(c => (
+              <div key={c.id} className="flex items-center gap-2 bg-slate-900 neu-flat rounded-lg px-2.5 py-1.5">
+                <span className={`w-5 h-5 shrink-0 rounded-full grid place-items-center text-[11px] bg-gradient-to-br ${catColor(c.color).bar}`}>
+                  {c.emoji || "🏷️"}
+                </span>
+                <span className="text-xs font-semibold text-slate-200 truncate flex-1">{c.label}</span>
+                <button
+                  type="button" onClick={() => startEdit(c)} disabled={busy}
+                  title="Sửa" aria-label={`Sửa ${c.label}`}
+                  className="p-1.5 bg-slate-950 neu-btn rounded-lg text-slate-500 hover:text-amber-400 cursor-pointer disabled:opacity-50"
+                ><Pencil className="w-3.5 h-3.5" /></button>
+                <button
+                  type="button" onClick={() => remove(c)} disabled={busy}
+                  title="Xóa" aria-label={`Xóa ${c.label}`}
+                  className="p-1.5 bg-slate-950 neu-btn rounded-lg text-slate-500 hover:text-rose-400 cursor-pointer disabled:opacity-50"
+                ><Trash2 className="w-3.5 h-3.5" /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Form thêm / sửa hạng mục riêng */}
+      <div className="pt-2 mt-1 border-t border-slate-800/70 space-y-2">
+        <p className="text-[11px] font-bold text-slate-400">{editingId ? "Sửa hạng mục" : "Thêm hạng mục mới"}</p>
+        <div className="flex items-center gap-2">
+          <input
+            type="text" value={emoji} onChange={(e) => setEmoji(e.target.value)} maxLength={4}
+            placeholder="🏷️" aria-label="Emoji hạng mục"
+            className="w-14 shrink-0 text-center bg-slate-950 neu-pressed-sm rounded-lg px-2 py-2.5 text-slate-200 outline-none focus:border-indigo-500"
+          />
+          <input
+            type="text" value={label} onChange={(e) => setLabel(e.target.value)} maxLength={30}
+            placeholder="Tên hạng mục (vd: Thú cưng)" aria-label="Tên hạng mục"
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
+            className="flex-1 min-w-0 bg-slate-950 neu-pressed-sm rounded-lg px-3 py-2.5 text-slate-200 outline-none focus:border-indigo-500"
+          />
+        </div>
+        {/* Biểu tượng gợi ý — bấm để chọn nhanh */}
+        <div>
+          <span className="text-[10px] uppercase tracking-wider text-slate-500">Biểu tượng</span>
+          <div className="mt-1.5 max-w-[19rem] bg-slate-950/40 neu-pressed-sm rounded-xl p-2">
+            <div className="grid grid-cols-8 gap-1">
+              {QUICK_EMOJIS.map(e => {
+                const active = emoji.trim() === e;
+                return (
+                  <button
+                    key={e} type="button" onClick={() => setEmoji(e)}
+                    aria-label={`Biểu tượng ${e}`} aria-pressed={active}
+                    className={`w-8 h-8 grid place-items-center rounded-lg text-lg leading-none cursor-pointer transition-colors ${
+                      active ? "bg-indigo-500/20 ring-1 ring-indigo-500/50" : "hover:bg-slate-800"
+                    }`}
+                  >{e}</button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Xem trước — hiện đúng như chip hạng mục trong danh sách thu chi */}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-slate-500 shrink-0">Xem trước</span>
+          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold min-w-0 ${catColor(color).chip}`}>
+            <span className="leading-none">{emoji.trim() || "🏷️"}</span>
+            <span className="truncate">{label.trim() || "Tên hạng mục"}</span>
+          </span>
+        </div>
+
+        {/* Bảng màu — khay lõm, lưới đều, ô đang chọn có dấu ✓ */}
+        <div>
+          <span className="text-[10px] uppercase tracking-wider text-slate-500">Màu nhãn</span>
+          <div className="mt-1.5 max-w-[19rem] bg-slate-950/40 neu-pressed-sm rounded-xl p-2.5">
+            <div className="grid grid-cols-8 gap-2 place-items-center">
+              {EXPENSE_CAT_COLOR_KEYS.map(k => {
+                const active = color === k;
+                return (
+                  <button
+                    key={k} type="button" onClick={() => setColor(k)}
+                    aria-label={`Màu ${k}`} aria-pressed={active} title={k}
+                    className={`relative w-7 h-7 rounded-full bg-gradient-to-br ${catColor(k).bar} cursor-pointer transition-transform duration-150 hover:scale-110 ${
+                      active ? "ring-2 ring-slate-100 ring-offset-2 ring-offset-slate-950" : "hover:ring-1 hover:ring-slate-100/40"
+                    }`}
+                  >
+                    {active && <Check className="w-4 h-4 text-white absolute inset-0 m-auto drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]" strokeWidth={3} />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+        {err && <p className="text-[11px] text-rose-400 flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {err}</p>}
+        <div className="flex items-center gap-2">
+          <button
+            type="button" onClick={submit} disabled={busy || !label.trim()}
+            className="flex items-center gap-1.5 bg-indigo-500 hover:bg-indigo-400 text-white rounded-xl px-3.5 py-2 text-xs font-bold cursor-pointer transition-all disabled:opacity-50"
+          >
+            {editingId ? <Save className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+            {busy ? "Đang lưu..." : editingId ? "Lưu thay đổi" : "Thêm hạng mục"}
+          </button>
+          {editingId && (
+            <button
+              type="button" onClick={resetForm} disabled={busy}
+              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl px-3.5 py-2 text-xs font-bold cursor-pointer transition-all disabled:opacity-50"
+            ><X className="w-4 h-4" /> Hủy</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function Settings({
@@ -124,7 +371,12 @@ export function Settings({
   rewardsEnabled,
   onSetRewardsEnabled,
   rewardApprovalThreshold,
-  onSetRewardApprovalThreshold
+  onSetRewardApprovalThreshold,
+  customCategories,
+  hiddenBuiltinCategories,
+  onSaveCustomCategory,
+  onDeleteCustomCategory,
+  onSetHiddenCategories
 }: SettingsProps) {
   const { t, i18n } = useTranslation();
   // In-app confirmation dialog (replaces native browser confirm)
@@ -1696,6 +1948,18 @@ export function Settings({
             </div>
           )}
         </div>
+      )}
+
+      {/* Quản lý hạng mục chi phí — admin, trong tab Hệ thống */}
+      {activeTab === "backups" && currentUser.role === UserRole.ADMIN && (
+        <CategoryManagerCard
+          customCategories={customCategories}
+          hiddenBuiltinCategories={hiddenBuiltinCategories}
+          onSaveCustomCategory={onSaveCustomCategory}
+          onDeleteCustomCategory={onDeleteCustomCategory}
+          onSetHiddenCategories={onSetHiddenCategories}
+          confirm={confirm}
+        />
       )}
 
       {/* Ngôn ngữ hiển thị — tùy chọn cá nhân, lưu trên thiết bị (mọi thành viên) */}

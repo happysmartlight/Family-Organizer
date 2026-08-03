@@ -18,6 +18,7 @@ import {
   RewardPointEntry,
   RewardItem,
   BudgetLimit,
+  CustomExpenseCategory,
   RecurringBill,
   FamilyAsset,
   MedicationReminder,
@@ -182,6 +183,8 @@ const initialDBState = (): FamilyOrganizerDB => {
     rewardLedger: [],
     rewardItems: [],
     budgets: [],
+    customCategories: [],
+    hiddenBuiltinCategories: [],
     recurringBills: [],
     savingsGoals: [],
     debts: [],
@@ -213,6 +216,8 @@ function normalizeDB(db: any): FamilyOrganizerDB {
   db.rewardLedger = db.rewardLedger || [];
   db.rewardItems = db.rewardItems || [];
   db.budgets = db.budgets || [];
+  db.customCategories = db.customCategories || [];
+  db.hiddenBuiltinCategories = Array.isArray(db.hiddenBuiltinCategories) ? db.hiddenBuiltinCategories : [];
   db.recurringBills = db.recurringBills || [];
   db.savingsGoals = db.savingsGoals || [];
   db.debts = db.debts || [];
@@ -1523,6 +1528,67 @@ export class FamilyDB {
     const db = this.readRaw();
     db.budgets = db.budgets.filter(b => b.id !== id);
     this.writeRaw(db);
+  }
+
+  // ─── Hạng mục CHI tùy chỉnh (Admin) ──────────────────────────────────────
+  // Cấu hình = danh sách hạng mục tự thêm + danh sách key mặc định bị ẩn.
+  public static getCategoryConfig(): { customCategories: CustomExpenseCategory[]; hiddenBuiltinCategories: string[] } {
+    const db = this.readRaw();
+    return {
+      customCategories: db.customCategories,
+      hiddenBuiltinCategories: db.hiddenBuiltinCategories
+    };
+  }
+
+  public static saveCustomCategory(data: Partial<CustomExpenseCategory>, userId: string, username: string): CustomExpenseCategory {
+    const db = this.readRaw();
+    const now = new Date().toISOString();
+    const label = String(data.label || "").trim();
+    if (!label) throw new Error("Tên hạng mục không được để trống");
+    // Emoji/màu tùy chọn — mặc định nhãn 🏷️ + màu slate khi để trống.
+    const emoji = String(data.emoji || "").trim() || "🏷️";
+    const color = String(data.color || "").trim() || "slate";
+
+    if (data.id) {
+      const idx = db.customCategories.findIndex(c => c.id === data.id);
+      if (idx === -1) throw new Error("Không tìm thấy hạng mục");
+      const updated: CustomExpenseCategory = { ...db.customCategories[idx], label, emoji, color, updatedAt: now };
+      db.customCategories[idx] = updated;
+      this.writeRaw(db);
+      this.logActivity(userId, username, "Hạng mục chi", `Đã cập nhật hạng mục "${label}".`);
+      return updated;
+    }
+
+    // Không cho trùng tên (không phân biệt hoa/thường) với hạng mục tự thêm khác.
+    if (db.customCategories.some(c => c.label.toLowerCase() === label.toLowerCase())) {
+      throw new Error("Đã có hạng mục tự thêm trùng tên này");
+    }
+    const cat: CustomExpenseCategory = {
+      id: `cc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      label, emoji, color, createdAt: now, updatedAt: now
+    };
+    db.customCategories.push(cat);
+    this.writeRaw(db);
+    this.logActivity(userId, username, "Hạng mục chi", `Đã thêm hạng mục "${label}".`);
+    return cat;
+  }
+
+  public static deleteCustomCategory(id: string, userId: string, username: string): void {
+    const db = this.readRaw();
+    const cat = db.customCategories.find(c => c.id === id);
+    db.customCategories = db.customCategories.filter(c => c.id !== id);
+    this.writeRaw(db);
+    if (cat) this.logActivity(userId, username, "Hạng mục chi", `Đã xóa hạng mục "${cat.label}".`);
+  }
+
+  // Đặt danh sách key hạng mục MẶC ĐỊNH bị ẩn (chỉ giữ chuỗi hợp lệ, khử trùng lặp).
+  public static setHiddenBuiltinCategories(keys: string[], userId: string, username: string): string[] {
+    const db = this.readRaw();
+    const cleaned = Array.from(new Set((Array.isArray(keys) ? keys : []).map(k => String(k || "").trim()).filter(Boolean)));
+    db.hiddenBuiltinCategories = cleaned;
+    this.writeRaw(db);
+    this.logActivity(userId, username, "Hạng mục chi", `Đã cập nhật danh sách hạng mục mặc định bị ẩn (${cleaned.length}).`);
+    return cleaned;
   }
 
   /**

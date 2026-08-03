@@ -1317,6 +1317,40 @@ app.delete("/api/finance/budgets/:id", requireAuth, requireRole([UserRole.ADMIN,
   res.json({ success: true });
 });
 
+// Hạng mục CHI: đọc cho mọi người dùng tài chính (để render/chọn); chỉnh sửa chỉ Admin.
+app.get("/api/finance/categories", requireAuth, requireRole([UserRole.ADMIN, UserRole.MEMBER]), (_req: AuthRequest, res: Response) => {
+  res.json(FamilyDB.getCategoryConfig());
+});
+
+app.post("/api/finance/categories", requireAuth, requireRole([UserRole.ADMIN]), (req: AuthRequest, res: Response) => {
+  const session = req.userSession!;
+  try {
+    const category = FamilyDB.saveCustomCategory(req.body, session.userId, session.username);
+    broadcastSyncEvent("FINANCE_UPDATE", { categoryId: category.id });
+    res.json({ category, ...FamilyDB.getCategoryConfig() });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete("/api/finance/categories/:id", requireAuth, requireRole([UserRole.ADMIN]), (req: AuthRequest, res: Response) => {
+  const session = req.userSession!;
+  FamilyDB.deleteCustomCategory(req.params.id, session.userId, session.username);
+  broadcastSyncEvent("FINANCE_UPDATE", { deletedCategoryId: req.params.id });
+  res.json({ success: true, ...FamilyDB.getCategoryConfig() });
+});
+
+app.put("/api/finance/categories/hidden", requireAuth, requireRole([UserRole.ADMIN]), (req: AuthRequest, res: Response) => {
+  const session = req.userSession!;
+  try {
+    const hiddenBuiltinCategories = FamilyDB.setHiddenBuiltinCategories(req.body?.hidden, session.userId, session.username);
+    broadcastSyncEvent("FINANCE_UPDATE", { hiddenCategories: hiddenBuiltinCategories.length });
+    res.json({ hiddenBuiltinCategories });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get("/api/finance/recurring-bills", requireAuth, requireRole([UserRole.ADMIN, UserRole.MEMBER]), (req: AuthRequest, res: Response) => {
   res.json({ recurringBills: FamilyDB.getRecurringBills() });
 });

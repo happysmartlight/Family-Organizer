@@ -40,6 +40,7 @@ import {
   RewardPointEntry,
   RewardItem,
   BudgetLimit,
+  CustomExpenseCategory,
   RecurringBill,
   MedicationReminder,
   MedicationLog,
@@ -354,6 +355,9 @@ export default function App() {
   const [rewardTotals, setRewardTotals] = useState<Record<string, number>>({});
   const [rewardItems, setRewardItems] = useState<RewardItem[]>([]);
   const [budgets, setBudgets] = useState<BudgetLimit[]>([]);
+  // Hạng mục CHI tùy chỉnh (Admin quản lý) + danh sách hạng mục mặc định bị ẩn.
+  const [customCategories, setCustomCategories] = useState<CustomExpenseCategory[]>([]);
+  const [hiddenBuiltinCategories, setHiddenBuiltinCategories] = useState<string[]>([]);
   const [recurringBills, setRecurringBills] = useState<RecurringBill[]>([]);
   const [savingsGoals, setSavingsGoals] = useState<SavingsGoal[]>([]);
   const [debts, setDebts] = useState<Debt[]>([]);
@@ -505,16 +509,22 @@ export default function App() {
   const fetchFinancePlanning = async () => {
     if (!currentUser || !canAccessFinance(currentUser.role)) return;
     try {
-      const [budgetRes, billRes, assetRes, savingsRes, debtRes] = await Promise.all([
+      const [budgetRes, billRes, assetRes, savingsRes, debtRes, catRes] = await Promise.all([
         fetch("/api/finance/budgets", { headers: getAuthHeader() }),
         fetch("/api/finance/recurring-bills", { headers: getAuthHeader() }),
         fetch("/api/finance/assets", { headers: getAuthHeader() }),
         fetch("/api/finance/savings-goals", { headers: getAuthHeader() }),
-        fetch("/api/finance/debts", { headers: getAuthHeader() })
+        fetch("/api/finance/debts", { headers: getAuthHeader() }),
+        fetch("/api/finance/categories", { headers: getAuthHeader() })
       ]);
       if (budgetRes.ok) {
         const data = await budgetRes.json();
         setBudgets(data.budgets || []);
+      }
+      if (catRes.ok) {
+        const data = await catRes.json();
+        setCustomCategories(data.customCategories || []);
+        setHiddenBuiltinCategories(data.hiddenBuiltinCategories || []);
       }
       if (billRes.ok) {
         const data = await billRes.json();
@@ -1165,6 +1175,57 @@ export default function App() {
     } catch {
       /* carry-forward là tiện ích, lỗi không chặn UI */
     }
+  };
+
+  // ─── Hạng mục CHI tùy chỉnh (Admin) ──────────────────────────────────────
+  // Đọc JSON an toàn: nếu server trả rỗng/không phải JSON (vd route chưa tồn tại vì
+  // máy chủ chưa được khởi động lại sau khi cập nhật), báo lỗi rõ ràng thay vì
+  // "Unexpected end of JSON input".
+  const readJsonOrThrow = async (res: Response, fallbackMsg: string) => {
+    const text = await res.text();
+    let data: any = {};
+    if (text) { try { data = JSON.parse(text); } catch { /* body không phải JSON */ } }
+    if (!res.ok) {
+      throw new Error(data?.error || (res.status === 404
+        ? "Máy chủ chưa có tính năng này — hãy khởi động lại máy chủ (server) rồi thử lại."
+        : fallbackMsg));
+    }
+    return data;
+  };
+
+  const handleSaveCustomCategory = async (payload: Partial<CustomExpenseCategory>) => {
+    const res = await fetch("/api/finance/categories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getAuthHeader() },
+      body: JSON.stringify(payload)
+    });
+    const data = await readJsonOrThrow(res, "Không lưu được hạng mục");
+    setCustomCategories(data.customCategories || []);
+    setHiddenBuiltinCategories(data.hiddenBuiltinCategories || []);
+    return data;
+  };
+
+  const handleDeleteCustomCategory = async (id: string) => {
+    const res = await fetch(`/api/finance/categories/${id}`, {
+      method: "DELETE",
+      headers: getAuthHeader()
+    });
+    const data = await readJsonOrThrow(res, "Không xóa được hạng mục");
+    setCustomCategories(data.customCategories || []);
+    setHiddenBuiltinCategories(data.hiddenBuiltinCategories || []);
+    return data;
+  };
+
+  const handleSetHiddenCategories = async (hidden: string[]) => {
+    const res = await fetch("/api/finance/categories/hidden", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getAuthHeader() },
+      body: JSON.stringify({ hidden })
+    });
+    const data = await readJsonOrThrow(res, "Không lưu được cấu hình hạng mục");
+    // res.ok nhưng body rỗng (hiếm) → giữ lựa chọn người dùng vừa bấm.
+    setHiddenBuiltinCategories(data.hiddenBuiltinCategories || hidden);
+    return data;
   };
 
   const handleSaveRecurringBill = async (payload: Partial<RecurringBill>) => {
@@ -1896,6 +1957,7 @@ export default function App() {
                   plans={plans}
                   notes={notes}
                   transactions={transactions}
+                  customCategories={customCategories}
                   activityLogs={activityLogs}
                   widgets={widgets}
                   onViewPlan={handleViewPlan}
@@ -1975,6 +2037,8 @@ export default function App() {
                   users={users}
                   transactions={transactions}
                   budgets={budgets}
+                  customCategories={customCategories}
+                  hiddenBuiltinCategories={hiddenBuiltinCategories}
                   recurringBills={recurringBills}
                   savingsGoals={savingsGoals}
                   debts={debts}
@@ -2060,6 +2124,11 @@ export default function App() {
                   onSetRewardsEnabled={handleSetRewardsEnabled}
                   rewardApprovalThreshold={rewardApprovalThreshold}
                   onSetRewardApprovalThreshold={handleSetRewardApprovalThreshold}
+                  customCategories={customCategories}
+                  hiddenBuiltinCategories={hiddenBuiltinCategories}
+                  onSaveCustomCategory={handleSaveCustomCategory}
+                  onDeleteCustomCategory={handleDeleteCustomCategory}
+                  onSetHiddenCategories={handleSetHiddenCategories}
                 />
               )}
             </motion.div>

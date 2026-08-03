@@ -24,6 +24,7 @@ const COLLECTIONS: { key: keyof FamilyOrganizerDB; table: string }[] = [
   { key: "rewardLedger", table: "reward_ledger" },
   { key: "rewardItems", table: "reward_items" },
   { key: "budgets", table: "budgets" },
+  { key: "customCategories", table: "custom_categories" },
   { key: "recurringBills", table: "recurring_bills" },
   { key: "savingsGoals", table: "savings_goals" },
   { key: "debts", table: "debts" },
@@ -74,7 +75,7 @@ const setMetaStmt = db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VAL
 setMetaStmt.run("schema_version", String(SCHEMA_VERSION));
 
 // Singleton (non-array) fields stored as a single JSON row in app_meta.
-const SINGLETON_KEYS: (keyof FamilyOrganizerDB)[] = ["mealPlan"];
+const SINGLETON_KEYS: (keyof FamilyOrganizerDB)[] = ["mealPlan", "hiddenBuiltinCategories"];
 
 /** True when the database has never been seeded (no user accounts yet). */
 export function sqliteIsEmpty(): boolean {

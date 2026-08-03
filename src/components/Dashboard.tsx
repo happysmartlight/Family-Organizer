@@ -24,7 +24,8 @@ import {
   CloudRain,
   Waves
 } from "lucide-react";
-import { Task, FamilyPlan, Note, FinancialTransaction, User, TaskStatus, MarketHistoryPoint } from "../types.js";
+import { Task, FamilyPlan, Note, FinancialTransaction, User, TaskStatus, MarketHistoryPoint, CustomExpenseCategory } from "../types.js";
+import { resolveCategory, catColor } from "../utils/expenseCategories.js";
 import { motion, useReducedMotion } from "motion/react";
 import { Avatar } from "./Avatar.js";
 import { QuickNudge } from "./QuickNudge.js";
@@ -39,33 +40,11 @@ import i18n from "../i18n/index.js";
 const MarkdownView = lazy(() => import("./Markdown.js"));
 const MarkdownFallback = () => <p className="text-slate-600 text-[11px]">Đang hiển thị…</p>;
 
-// Emoji + màu thanh cho hạng mục CHI — khớp bộ màu ở tab Tài chính. Nhãn dịch qua
-// i18n (namespace "categories"); hạng mục tự đặt → giữ nguyên tên gốc.
-const EXPENSE_CAT_STYLE: Record<string, { emoji: string; bar: string }> = {
-  food:          { emoji: "🍲", bar: "from-orange-500 to-orange-400" },
-  education2:    { emoji: "📚", bar: "from-violet-500 to-violet-400" },
-  utilities:     { emoji: "⚡", bar: "from-amber-500 to-amber-400" },
-  shopping:      { emoji: "🛍️", bar: "from-pink-500 to-pink-400" },
-  medical:       { emoji: "💊", bar: "from-rose-500 to-rose-400" },
-  transport:     { emoji: "🚗", bar: "from-sky-500 to-sky-400" },
-  debt_bank:     { emoji: "🏦", bar: "from-red-500 to-red-400" },
-  debt_personal: { emoji: "🤝", bar: "from-teal-500 to-teal-400" },
-  funeral:       { emoji: "🌸", bar: "from-zinc-500 to-zinc-400" },
-  ceremony:      { emoji: "🎁", bar: "from-yellow-500 to-yellow-400" },
-  rent:          { emoji: "🏠", bar: "from-indigo-500 to-indigo-400" },
-  internet:      { emoji: "🌐", bar: "from-cyan-500 to-cyan-400" },
-  phone:         { emoji: "📱", bar: "from-purple-500 to-purple-400" },
-  insurance:     { emoji: "🛡️", bar: "from-slate-500 to-slate-400" },
-  loan:          { emoji: "🏦", bar: "from-red-500 to-red-400" },
-  other:         { emoji: "🏷️", bar: "from-slate-600 to-slate-500" },
-};
-const expenseCatMeta = (cat: string) => {
-  const style = EXPENSE_CAT_STYLE[cat];
-  return {
-    label: i18n.t(`categories.${cat}`, { defaultValue: cat || i18n.t("categories.other") }),
-    emoji: style?.emoji || "🏷️",
-    bar: style?.bar || "from-slate-600 to-slate-500",
-  };
+// Emoji + màu thanh + nhãn cho hạng mục CHI — lấy từ nguồn chân lý dùng chung
+// (src/utils/expenseCategories.ts), bao gồm cả hạng mục mặc định lẫn hạng mục tự thêm.
+const expenseCatMeta = (cat: string, custom: CustomExpenseCategory[] = []) => {
+  const r = resolveCategory(cat || "other", custom);
+  return { label: r.label, emoji: r.emoji, bar: catColor(r.color).bar };
 };
 
 interface DashboardProps {
@@ -75,6 +54,7 @@ interface DashboardProps {
   plans: FamilyPlan[];
   notes: Note[];
   transactions: FinancialTransaction[];
+  customCategories?: CustomExpenseCategory[];
   activityLogs: any[];
   widgets: any;
   onViewPlan: (planId: string) => void;
@@ -317,6 +297,7 @@ export function Dashboard({
   plans,
   notes,
   transactions,
+  customCategories = [],
   activityLogs,
   widgets,
   onViewPlan,
@@ -1246,7 +1227,7 @@ export function Dashboard({
                 </div>
                 <div className="space-y-2">
                   {topExpenseCategories.map(({ category, amount, pct }, i) => {
-                    const meta = expenseCatMeta(category);
+                    const meta = expenseCatMeta(category, customCategories);
                     return (
                       <div key={category} className="space-y-1">
                         <div className="flex items-center justify-between text-[11px]">

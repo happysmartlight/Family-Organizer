@@ -31,7 +31,6 @@ import {
   Car,
   Landmark,
   Users,
-  HelpCircle,
   ArrowUpRight,
   ArrowDownRight,
   Home,
@@ -41,7 +40,8 @@ import {
   Flower2,
   Gift
 } from "lucide-react";
-import { FinancialTransaction, TransactionType, ExpenseCategory, AccountType, User, UserRole, BudgetLimit, RecurringBill, FamilyAsset, SavingsGoal, Debt, canAccessFinance } from "../types.js";
+import { FinancialTransaction, TransactionType, ExpenseCategory, AccountType, User, UserRole, BudgetLimit, CustomExpenseCategory, RecurringBill, FamilyAsset, SavingsGoal, Debt, canAccessFinance } from "../types.js";
+import { activeExpenseCategories, resolveCategory, catColor } from "../utils/expenseCategories.js";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import { useConfirm } from "./ConfirmDialog.js";
 import { Assets } from "./Assets.js";
@@ -70,26 +70,13 @@ const fmtShortMoney = (n: number): string => {
   return String(Math.round(n));
 };
 
-// Màu CỐ ĐỊNH theo hạng mục — TRÙNG với categoryColorClass/categoryIcon ở phần dòng tiền,
-// để liếc màu/icon là nhận ra hạng mục. Class viết literal đầy đủ cho Tailwind JIT.
-const CAT_BAR: Record<string, { bar: string; text: string }> = {
-  food:          { bar: "from-orange-500 to-orange-400", text: "text-orange-400" },
-  education2:    { bar: "from-violet-500 to-violet-400", text: "text-violet-400" },
-  utilities:     { bar: "from-amber-500 to-amber-400",   text: "text-amber-400" },
-  shopping:      { bar: "from-pink-500 to-pink-400",     text: "text-pink-400" },
-  medical:       { bar: "from-rose-500 to-rose-400",     text: "text-rose-400" },
-  transport:     { bar: "from-sky-500 to-sky-400",       text: "text-sky-400" },
-  debt_bank:     { bar: "from-red-500 to-red-400",       text: "text-red-400" },
-  loan:          { bar: "from-red-500 to-red-400",       text: "text-red-400" },
-  debt_personal: { bar: "from-teal-500 to-teal-400",     text: "text-teal-400" },
-  funeral:       { bar: "from-zinc-500 to-zinc-400",     text: "text-zinc-400" },
-  ceremony:      { bar: "from-yellow-500 to-yellow-400", text: "text-yellow-400" },
-  rent:          { bar: "from-indigo-500 to-indigo-400", text: "text-indigo-400" },
-  internet:      { bar: "from-cyan-500 to-cyan-400",     text: "text-cyan-400" },
-  phone:         { bar: "from-purple-500 to-purple-400", text: "text-purple-400" },
-  insurance:     { bar: "from-slate-500 to-slate-400",   text: "text-slate-300" },
+// Màu/emoji/nhãn theo hạng mục CHI nay lấy từ nguồn chân lý dùng chung
+// src/utils/expenseCategories.ts (gồm cả hạng mục MẶC ĐỊNH lẫn hạng mục tự thêm).
+// Bảng màu cho hạng mục hóa đơn cố định (rent/internet/phone/insurance) vẫn dùng
+// key màu tương ứng trong util qua catColor().
+const BILL_CAT_COLOR: Record<string, string> = {
+  rent: "indigo", internet: "cyan", phone: "purple", insurance: "slate", loan: "red",
 };
-const catBar = (cat: string) => CAT_BAR[cat] || { bar: "from-slate-600 to-slate-500", text: "text-slate-400" };
 
 // Làm tròn trần "đẹp" cho trục Y (1/2/5 × 10^n) để nhãn chia đều dễ đọc.
 const niceCeil = (v: number): number => {
@@ -155,6 +142,8 @@ interface FinanceProps {
   users: User[];
   transactions: FinancialTransaction[];
   budgets: BudgetLimit[];
+  customCategories: CustomExpenseCategory[];
+  hiddenBuiltinCategories: string[];
   recurringBills: RecurringBill[];
   savingsGoals: SavingsGoal[];
   debts: Debt[];
@@ -360,6 +349,8 @@ export function Finance({
   users,
   transactions,
   budgets,
+  customCategories,
+  hiddenBuiltinCategories,
   recurringBills,
   savingsGoals,
   debts,
@@ -398,19 +389,19 @@ export function Finance({
     return t("finance.periodLabelMonth", { mm: String(a.getMonth() + 1).padStart(2, "0"), yyyy });
   };
 
-  const expenseCategoryOptions = useMemo(() => [
-    { value: "food",          label: t("categories.food") + " 🍲" },
-    { value: "education2",    label: t("categories.education2") + " 📚" },
-    { value: "utilities",     label: t("categories.utilities") + " ⚡" },
-    { value: "shopping",      label: t("categories.shopping") + " 🛍️" },
-    { value: "medical",       label: t("categories.medical") + " 💊" },
-    { value: "transport",     label: t("categories.transport") + " 🚗" },
-    { value: "debt_bank",     label: t("categories.debt_bank") + " 🏦" },
-    { value: "debt_personal", label: t("categories.debt_personal") + " 🤝" },
-    { value: "funeral",       label: t("categories.funeral") + " 🌸" },
-    { value: "ceremony",      label: t("categories.ceremony") + " 🎁" },
-    { value: "other",         label: t("categories.other") + " 🏷️" }
-  ], [i18nHook.language]);
+  // Hạng mục CHI hiển thị trong ô chọn = mặc định (trừ những cái đã ẩn) + tự thêm.
+  const expenseCategoryOptions = useMemo(
+    () => activeExpenseCategories(customCategories, hiddenBuiltinCategories)
+      .map(c => ({ value: c.value, label: `${c.label} ${c.emoji}` })),
+    [customCategories, hiddenBuiltinCategories, i18nHook.language]
+  );
+
+  // Đảm bảo giá trị đang chọn (vd hạng mục đã ẩn/đã xóa khi sửa giao dịch cũ) vẫn
+  // có trong danh sách để FancySelect không hiển thị trống.
+  const withSelectedCategory = (opts: { value: string; label: string }[], value: string) =>
+    value && !opts.some(o => o.value === value)
+      ? [...opts, { value, label: `${resolveCat(value).label} ${resolveCat(value).emoji}` }]
+      : opts;
 
   const billFrequencyOptions = useMemo(() => [
     { value: "weekly",  label: t("finance.billFreqWeekly") },
@@ -899,8 +890,12 @@ export function Finance({
   };
 
   // Naming converters
-  // Nhãn hạng mục dùng chung namespace "categories"; hạng mục tự đặt giữ tên gốc.
-  const translateCategory = (cat: string) => t(`categories.${cat}`, { defaultValue: cat });
+  // Nhãn/màu hạng mục CHI lấy từ nguồn chân lý dùng chung (mặc định + tự thêm).
+  const resolveCat = (cat: string) => resolveCategory(cat, customCategories);
+  const translateCategory = (cat: string) => resolveCat(cat).label;
+
+  // Cặp màu bar/text: ưu tiên hạng mục hóa đơn cố định, rồi tới màu hạng mục CHI.
+  const catBar = (cat: string) => catColor(BILL_CAT_COLOR[cat] || resolveCat(cat).color);
 
   const translateAccount = (acc: string) => {
     switch (acc) {
@@ -911,26 +906,7 @@ export function Finance({
     }
   };
 
-  const categoryColorClass = (cat: string) => {
-    switch (cat) {
-      case "food":          return "text-orange-400 bg-orange-500/10";
-      case "education2":    return "text-violet-400 bg-violet-500/10";
-      case "utilities":     return "text-amber-400 bg-amber-500/10";
-      case "shopping":      return "text-pink-400 bg-pink-500/10";
-      case "medical":       return "text-rose-400 bg-rose-500/10";
-      case "transport":     return "text-sky-400 bg-sky-500/10";
-      case "debt_bank":
-      case "loan":          return "text-red-400 bg-red-500/10";
-      case "debt_personal": return "text-teal-400 bg-teal-500/10";
-      case "funeral":       return "text-zinc-400 bg-zinc-500/15";
-      case "ceremony":      return "text-yellow-400 bg-yellow-500/10";
-      case "rent":          return "text-indigo-400 bg-indigo-500/10";
-      case "internet":      return "text-cyan-400 bg-cyan-500/10";
-      case "phone":         return "text-purple-400 bg-purple-500/10";
-      case "insurance":     return "text-slate-300 bg-slate-700/40";
-      default:              return "text-slate-400 bg-slate-800";
-    }
-  };
+  const categoryColorClass = (cat: string) => catColor(BILL_CAT_COLOR[cat] || resolveCat(cat).color).chip;
 
   const categoryIcon = (cat: string) => {
     switch (cat) {
@@ -949,7 +925,8 @@ export function Finance({
       case "internet":      return <Wifi className="w-4 h-4" />;
       case "phone":         return <Phone className="w-4 h-4" />;
       case "insurance":     return <Shield className="w-4 h-4" />;
-      default:              return <HelpCircle className="w-4 h-4" />;
+      // Hạng mục tự thêm (hoặc lạ): hiện emoji của hạng mục thay cho icon lucide.
+      default:              return <span className="text-base leading-none">{resolveCat(cat).emoji}</span>;
     }
   };
 
@@ -1672,6 +1649,12 @@ export function Finance({
               <span className="flex items-center gap-1 text-zinc-400"><span className="w-2 h-2 rounded-full bg-zinc-400 inline-block" /> {t("categories.funeral")}</span>
               <span className="flex items-center gap-1 text-yellow-400"><span className="w-2 h-2 rounded-full bg-yellow-400 inline-block" /> {t("categories.ceremony")}</span>
               <span className="flex items-center gap-1 text-slate-400"><span className="w-2 h-2 rounded-full bg-slate-500 inline-block" /> {t("categories.other")}</span>
+              {/* Hạng mục tự thêm — đánh dấu bằng emoji riêng, màu theo cấu hình */}
+              {customCategories.map(c => (
+                <span key={c.id} className={`flex items-center gap-1 ${catColor(c.color).text}`}>
+                  <span className="leading-none">{c.emoji || "🏷️"}</span> {c.label}
+                </span>
+              ))}
             </div>
           </div>
 
@@ -1868,7 +1851,7 @@ export function Finance({
                       value={formCategory as string}
                       onChange={setFormCategory}
                       ariaLabel={t("finance.formCatExpenseAriaLabel")}
-                      options={expenseCategoryOptions}
+                      options={withSelectedCategory(expenseCategoryOptions, formCategory as string)}
                     />
                   ) : (
                     <div className="space-y-2">

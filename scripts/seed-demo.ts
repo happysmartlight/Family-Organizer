@@ -836,6 +836,8 @@ const demoDB: FamilyOrganizerDB = {
   rewardLedger,
   rewardItems,
   budgets,
+  customCategories: [],
+  hiddenBuiltinCategories: [],
   recurringBills,
   savingsGoals,
   debts,
