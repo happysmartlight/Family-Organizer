@@ -165,7 +165,7 @@ export function SavingsGoals({
       {savingsGoals.length === 0 ? (
         <p className="text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl p-4 text-center">{t("savingsGoals.empty")}</p>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-3 max-h-[18rem] overflow-y-auto overscroll-contain scrollbar-thin pr-1">
           {savingsGoals.map(goal => {
             const saved = sumContributions(goal);
             const pct = Math.max(0, Math.min(100, Math.round((saved / goal.targetAmount) * 100)));

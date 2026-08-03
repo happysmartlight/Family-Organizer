@@ -401,11 +401,15 @@ export function DebtTracker({
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6">
           <div className="space-y-2">
             <p className="text-[11px] font-bold text-rose-400 uppercase tracking-wider flex items-center gap-1"><ArrowDownLeft className="w-3.5 h-3.5" /> {t("debtTracker.sectionBorrowed")}</p>
-            {borrowed.length === 0 ? <p className="text-[10px] text-slate-600 px-1">{t("debtTracker.sectionEmpty")}</p> : borrowed.map(renderDebt)}
+            <div className="space-y-2 max-h-[18rem] overflow-y-auto overscroll-contain scrollbar-thin pr-1">
+              {borrowed.length === 0 ? <p className="text-[10px] text-slate-600 px-1">{t("debtTracker.sectionEmpty")}</p> : borrowed.map(renderDebt)}
+            </div>
           </div>
           <div className="space-y-2">
             <p className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1"><ArrowUpRight className="w-3.5 h-3.5" /> {t("debtTracker.sectionLent")}</p>
-            {lent.length === 0 ? <p className="text-[10px] text-slate-600 px-1">{t("debtTracker.sectionEmpty")}</p> : lent.map(renderDebt)}
+            <div className="space-y-2 max-h-[18rem] overflow-y-auto overscroll-contain scrollbar-thin pr-1">
+              {lent.length === 0 ? <p className="text-[10px] text-slate-600 px-1">{t("debtTracker.sectionEmpty")}</p> : lent.map(renderDebt)}
+            </div>
           </div>
         </div>
       )}
