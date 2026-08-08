@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { 
   Plus, 
@@ -27,7 +27,8 @@ import {
   Sparkles,
   Check,
   RotateCcw,
-  Camera
+  Camera,
+  ChevronDown
 } from "lucide-react";
 import { Task, TaskStatus, TaskPriority, User, UserRole, RewardPointEntry, RewardItem, RecurrenceType, isLimitedViewer, isAdultRole } from "../types.js";
 import { motion, AnimatePresence } from "motion/react";
@@ -152,6 +153,16 @@ export function Tasks({
   const [giftSaving, setGiftSaving] = useState(false);
   const [mysteryBusy, setMysteryBusy] = useState(false);
   const [mysteryResult, setMysteryResult] = useState<{ name: string; emoji?: string; cost: number } | null>(null);
+
+  // Thu gọn/mở rộng 2 khối thưởng — nhớ theo thiết bị để giữ giao diện gọn
+  const [rewardPointsOpen, setRewardPointsOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem("tasks:rewardPointsOpen") !== "0"; } catch { return true; }
+  });
+  const [rewardStoreOpen, setRewardStoreOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem("tasks:rewardStoreOpen") !== "0"; } catch { return true; }
+  });
+  useEffect(() => { try { localStorage.setItem("tasks:rewardPointsOpen", rewardPointsOpen ? "1" : "0"); } catch { /* ignore */ } }, [rewardPointsOpen]);
+  useEffect(() => { try { localStorage.setItem("tasks:rewardStoreOpen", rewardStoreOpen ? "1" : "0"); } catch { /* ignore */ } }, [rewardStoreOpen]);
 
   // Quick action states
   const [savingId, setSavingId] = useState<string | null>(null);
@@ -745,7 +756,7 @@ export function Tasks({
         </div>
 
         {/* Advanced Filters Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 pt-2 text-xs">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-3 pt-2 text-xs">
           {/* Status filter */}
           <div>
             <label className="text-slate-500 block mb-1">{t("tasks.filterStatusLbl")}</label>
@@ -809,8 +820,28 @@ export function Tasks({
             />
           </div>
 
-          {/* Clear Filters Button */}
-          <div className="col-span-2 md:col-span-1 flex items-end">
+          {/* Completed window filter */}
+          <div>
+            <label className="text-slate-500 block mb-1">{t("tasks.completedWindowLbl")}</label>
+            <FancySelect
+              value={completedWindowDays}
+              onChange={(v) => setCompletedWindowDays(v as "7" | "30" | "90" | "all")}
+              ariaLabel={t("tasks.completedWindowLbl")}
+              options={[
+                { value: "7", label: t("tasks.window7d") },
+                { value: "30", label: t("tasks.window30d") },
+                { value: "90", label: t("tasks.window90d") },
+                { value: "all", label: t("tasks.windowAll") }
+              ]}
+            />
+            {hiddenCompletedCount > 0 && (
+              <p className="mt-1 text-[10px] text-slate-500 tabular-nums">{t("tasks.hiddenCount", { n: hiddenCompletedCount })}</p>
+            )}
+          </div>
+
+          {/* Clear Filters Button — nhãn ẩn giữ chỗ để nút canh ngang cùng hàng với các ô select */}
+          <div className="col-span-2 md:col-span-1">
+            <label aria-hidden="true" className="text-slate-500 block mb-1 invisible select-none">.</label>
             <button
               onClick={() => {
                 setSearchTerm("");
@@ -843,15 +874,20 @@ export function Tasks({
       )}
 
       {rewardsEnabled && childUsers.length > 0 && (<>
-        <Reveal delay={0.06} className="relative overflow-hidden bg-slate-900 neu-raised rounded-2xl p-5 space-y-4" id="child-reward-panel">
+        <Reveal delay={0.06} className="relative overflow-hidden bg-slate-900 neu-raised rounded-2xl p-5" id="child-reward-panel">
           <ShimmerLine accent="amber" />
-          <div>
+          <button type="button" onClick={() => setRewardPointsOpen(v => !v)} aria-expanded={rewardPointsOpen} className="w-full text-left cursor-pointer">
             <h3 className="text-sm font-bold text-slate-200 flex items-center gap-1.5">
               <Star className="w-4 h-4 text-amber-400" /> {t("tasks.rewardTitle")}
+              <ChevronDown className={`w-4 h-4 text-slate-500 shrink-0 transition-transform ${rewardPointsOpen ? "rotate-180" : ""}`} />
             </h3>
             <p className="text-[11px] text-slate-500">{t("tasks.rewardSubtitle")}</p>
-          </div>
+          </button>
 
+          <AnimatePresence initial={false}>
+            {rewardPointsOpen && (
+              <motion.div key="reward-points-body" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }} className="overflow-hidden">
+                <div className="space-y-4 pt-4">
           {/* Thẻ điểm từng bé — avatar + sao cho thân thiện, dễ nhận diện */}
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 md:gap-5">
             {childUsers.map(child => {
@@ -905,15 +941,22 @@ export function Tasks({
               </form>
             </div>
           )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </Reveal>
 
         {/* ─── CARD RIÊNG: Cửa hàng đổi thưởng (điểm đổi thành quà thật) ─── */}
-        <Reveal delay={0.1} className="relative overflow-hidden bg-slate-900 neu-raised rounded-2xl p-5 space-y-3" id="reward-store">
+        <Reveal delay={0.1} className="relative overflow-hidden bg-slate-900 neu-raised rounded-2xl p-5" id="reward-store">
           <ShimmerLine accent="pink" />
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-1.5">
-              <Gift className="w-4 h-4 text-pink-400" /> {t("tasks.storeTitle")}
-            </h3>
+            <button type="button" onClick={() => setRewardStoreOpen(v => !v)} aria-expanded={rewardStoreOpen} className="flex items-center gap-1.5 text-left cursor-pointer shrink-0">
+              <Gift className="w-4 h-4 text-pink-400 shrink-0" />
+              <h3 className="text-sm font-bold text-slate-200">{t("tasks.storeTitle")}</h3>
+              <ChevronDown className={`w-4 h-4 text-slate-500 shrink-0 transition-transform ${rewardStoreOpen ? "rotate-180" : ""}`} />
+            </button>
+            {rewardStoreOpen && (
             <div className="flex items-center gap-2">
               {/* Người lớn chọn bé nhận quà; trẻ luôn đổi cho chính mình. Ô rộng để hiện đủ tên bé. */}
               {!isChildAccount && childUsers.length > 1 && (
@@ -937,8 +980,13 @@ export function Tasks({
                   </button>
                 )}
               </div>
+            )}
             </div>
 
+            <AnimatePresence initial={false}>
+              {rewardStoreOpen && (
+                <motion.div key="reward-store-body" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }} className="overflow-hidden">
+                  <div className="space-y-3 pt-3">
             {/* Form thêm / sửa quà (người lớn) */}
             {showGiftForm && isAdultRole(currentUser.role) && (
               <form onSubmit={handleAddGift} className="space-y-2">
@@ -1043,6 +1091,10 @@ export function Tasks({
                 })()}
               </div>
             )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
         </Reveal>
         </>
       )}
@@ -1055,10 +1107,10 @@ export function Tasks({
       ) : (
         <>
           <div className="space-y-4" id="tasks-kanban-board">
-            <Reveal delay={0.1} className="relative overflow-hidden flex flex-col xl:flex-row xl:items-center justify-between gap-4 bg-slate-900 neu-raised rounded-2xl p-4">
+            <Reveal delay={0.1} className="relative overflow-hidden bg-slate-900 neu-raised rounded-2xl p-4 sm:p-5">
               <ShimmerLine accent="sky" />
-              {/* Trái: tiêu đề bảng */}
-              <div className="flex items-center gap-2.5 min-w-0">
+              {/* Tiêu đề bảng */}
+              <div className="flex items-center gap-3 min-w-0">
                 <IconChip accent="sky"><Layers className="w-4 h-4" /></IconChip>
                 <div className="min-w-0">
                   <h3 className="text-sm font-bold text-slate-100">{t("tasks.boardTitle")}</h3>
@@ -1066,44 +1118,28 @@ export function Tasks({
                 </div>
               </div>
 
-              {/* Phải: cụm thống kê + bộ lọc thời gian gộp chung, căn phải cho cân đối */}
-              <div className="flex flex-col sm:flex-row sm:items-end gap-3 shrink-0">
-                <div className="grid grid-cols-4 gap-2 text-center">
-                  <div className="bg-slate-950 neu-pressed-sm rounded-xl px-2.5 py-1.5">
-                    <span className="block text-lg font-extrabold text-slate-100 tabular-nums leading-tight">{boardStats.total}</span>
-                    <span className="block text-[10px] text-slate-500">{t("tasks.statTotal")}</span>
-                  </div>
-                  <div className="bg-slate-950 neu-pressed-sm rounded-xl px-2.5 py-1.5">
-                    <span className="block text-lg font-extrabold text-sky-400 tabular-nums leading-tight">{boardStats.active}</span>
-                    <span className="block text-[10px] text-slate-500">{t("tasks.statActive")}</span>
-                  </div>
-                  <div className="bg-slate-950 neu-pressed-sm rounded-xl px-2.5 py-1.5">
-                    <span className="block text-lg font-extrabold text-rose-400 tabular-nums leading-tight">{boardStats.high}</span>
-                    <span className="block text-[10px] text-slate-500">{t("tasks.statUrgent")}</span>
-                  </div>
-                  <div className="bg-slate-950 neu-pressed-sm rounded-xl px-2.5 py-1.5">
-                    <span className="block text-lg font-extrabold text-amber-400 tabular-nums leading-tight">{boardStats.unassigned}</span>
-                    <span className="block text-[10px] text-slate-500">{t("tasks.statUnassigned")}</span>
-                  </div>
-                </div>
-                <div className="w-full sm:w-[168px] shrink-0">
-                  <label htmlFor="completed-window-filter" className="block text-[10px] text-slate-500 mb-1">{t("tasks.completedWindowLbl")}</label>
-                  <FancySelect
-                    id="completed-window-filter"
-                    value={completedWindowDays}
-                    onChange={(v) => setCompletedWindowDays(v as "7" | "30" | "90" | "all")}
-                    ariaLabel={t("tasks.completedWindowLbl")}
-                    options={[
-                      { value: "7", label: t("tasks.window7d") },
-                      { value: "30", label: t("tasks.window30d") },
-                      { value: "90", label: t("tasks.window90d") },
-                      { value: "all", label: t("tasks.windowAll") }
-                    ]}
-                  />
-                  {hiddenCompletedCount > 0 && (
-                    <p className="mt-1 text-[10px] text-slate-500 tabular-nums">{t("tasks.hiddenCount", { n: hiddenCompletedCount })}</p>
-                  )}
-                </div>
+              {/* Hàng dưới: thống kê dạng chip màu inline (chấm · số · nhãn) */}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800/60 border border-slate-800 px-2.5 py-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                  <span className="text-sm font-extrabold text-slate-100 tabular-nums leading-none">{boardStats.total}</span>
+                  <span className="text-[11px] font-medium text-slate-400">{t("tasks.statTotal")}</span>
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500/10 border border-sky-500/20 px-2.5 py-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+                  <span className="text-sm font-extrabold text-sky-400 tabular-nums leading-none">{boardStats.active}</span>
+                  <span className="text-[11px] font-medium text-slate-400">{t("tasks.statActive")}</span>
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-rose-500/10 border border-rose-500/20 px-2.5 py-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+                  <span className="text-sm font-extrabold text-rose-400 tabular-nums leading-none">{boardStats.high}</span>
+                  <span className="text-[11px] font-medium text-slate-400">{t("tasks.statUrgent")}</span>
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 px-2.5 py-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                  <span className="text-sm font-extrabold text-amber-400 tabular-nums leading-none">{boardStats.unassigned}</span>
+                  <span className="text-[11px] font-medium text-slate-400">{t("tasks.statUnassigned")}</span>
+                </span>
               </div>
             </Reveal>
 
