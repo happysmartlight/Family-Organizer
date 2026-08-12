@@ -32,6 +32,10 @@ const GOAL_COLORS: Record<string, string> = {
 
 const fmtMoney = (n: number) => n.toLocaleString("vi-VN");
 const parseMoney = (s: string) => Number(s.replace(/[^\d-]/g, "")) || 0;
+const fmtMoneyInput = (s: string) => {
+  const d = s.replace(/\D/g, "");
+  return d ? Number(d).toLocaleString("vi-VN") : "";
+};
 const sumContributions = (g: SavingsGoal) => g.contributions.reduce((s, c) => s + c.amount, 0);
 
 function daysLeft(dateStr?: string): number | null {
@@ -211,7 +215,7 @@ export function SavingsGoals({
                   <input
                     inputMode="numeric"
                     value={contribDraft[goal.id] || ""}
-                    onChange={e => setContribDraft(prev => ({ ...prev, [goal.id]: e.target.value }))}
+                    onChange={e => setContribDraft(prev => ({ ...prev, [goal.id]: fmtMoneyInput(e.target.value) }))}
                     placeholder={t("savingsGoals.contribPlaceholder")}
                     className="flex-1 min-w-0 bg-slate-950 neu-pressed-sm rounded-lg px-2.5 py-1.5 text-slate-200 outline-none focus:border-emerald-500 text-[11px]"
                   />

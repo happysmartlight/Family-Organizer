@@ -25,6 +25,10 @@ interface DebtTrackerProps {
 
 const fmtMoney = (n: number) => n.toLocaleString("vi-VN");
 const parseMoney = (s: string) => Number(s.replace(/[^\d]/g, "")) || 0;
+const fmtMoneyInput = (s: string) => {
+  const d = s.replace(/\D/g, "");
+  return d ? Number(d).toLocaleString("vi-VN") : "";
+};
 const paidOf = debtPaid;
 
 function daysLeft(dateStr?: string): number | null {
@@ -255,7 +259,7 @@ export function DebtTracker({
             <input
               inputMode="numeric"
               value={payDraft[debt.id] || ""}
-              onChange={e => setPayDraft(prev => ({ ...prev, [debt.id]: e.target.value }))}
+              onChange={e => setPayDraft(prev => ({ ...prev, [debt.id]: fmtMoneyInput(e.target.value) }))}
               placeholder={isBorrowed ? t("debtTracker.payPlaceholderBorrowed") : t("debtTracker.payPlaceholderLent")}
               className="flex-1 min-w-0 bg-slate-950 neu-pressed-sm rounded-lg px-2.5 py-1.5 text-slate-200 outline-none focus:border-sky-500 text-[11px]"
             />
