@@ -38,7 +38,8 @@ import {
   Phone,
   Shield,
   Flower2,
-  Gift
+  Gift,
+  Scale
 } from "lucide-react";
 import { FinancialTransaction, TransactionType, ExpenseCategory, AccountType, User, UserRole, BudgetLimit, CustomExpenseCategory, RecurringBill, FamilyAsset, SavingsGoal, Debt, canAccessFinance } from "../types.js";
 import { activeExpenseCategories, resolveCategory, catColor } from "../utils/expenseCategories.js";
@@ -56,6 +57,7 @@ import {
   periodMonths, pctDelta, calcTotals as calcTotalsUtil, accountBalances as accountBalancesUtil,
   monthlySeries, MonthlyPoint
 } from "../utils/financePeriod.js";
+import { debtRemaining } from "../utils/debt.js";
 import { useTabFab } from "./FabHost.js";
 import { DateInputDMY, formatDateVN } from "./DateTimePicker24.js";
 import { useTranslation } from "react-i18next";
@@ -591,6 +593,27 @@ export function Finance({
 
   // Số dư theo từng ví (logic thuần ở utils/financePeriod). Chưa có "số dư đầu kỳ".
   const accountBalances = useMemo(() => accountBalancesUtil(transactions), [transactions]);
+
+  // Tổng quan "Giá trị ròng": gộp số dư ví + quỹ tiết kiệm + cho mượn − đang nợ.
+  // Trong app này tiết kiệm & nợ là các "hũ" ĐỘC LẬP (đóng góp/khoản trả KHÔNG ghi
+  // vào transactions), nên cộng/trừ thẳng vào bức tranh tổng — không lo trùng với ví.
+  // Còn-lại của nợ dùng chung logic với DebtTracker (bỏ khoản đã tất toán / trả dư).
+  const netWorth = useMemo(() => {
+    const walletTotal = Object.values(accountBalances).reduce((s, v) => s + v, 0);
+    const savingsTotal = savingsGoals.reduce(
+      (s, g) => s + g.contributions.reduce((a, c) => a + c.amount, 0), 0
+    );
+    let lentRemaining = 0, borrowedRemaining = 0;
+    debts.forEach(d => {
+      if (d.isSettled) return;
+      const remaining = debtRemaining(d);
+      if (remaining <= 0) return;
+      if (d.direction === "lent") lentRemaining += remaining;
+      else borrowedRemaining += remaining;
+    });
+    const total = walletTotal + savingsTotal + lentRemaining - borrowedRemaining;
+    return { walletTotal, savingsTotal, lentRemaining, borrowedRemaining, total };
+  }, [accountBalances, savingsGoals, debts]);
 
   // Chuỗi 12 tháng gần nhất cho biểu đồ xu hướng (mọi giao dịch, không theo bộ lọc)
   const trendPoints = useMemo(() => monthlySeries(transactions, 12), [transactions]);
@@ -1387,6 +1410,39 @@ export function Finance({
           </div>
         </Reveal>
       </div>
+
+      {/* Giá trị ròng — nối tiết kiệm & nợ vào bức tranh tài chính chung. Chỉ hiện
+          khi có ít nhất một quỹ/khoản nợ (nếu không thì trùng với thẻ số dư ví). */}
+      {(savingsGoals.length > 0 || debts.length > 0) && (
+        <Reveal delay={0.08} className="relative overflow-hidden bg-slate-900 neu-raised rounded-2xl p-5 space-y-4" id="finance-networth">
+          <ShimmerLine accent="violet" />
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+              <span className="p-2 rounded-xl bg-violet-500/10 text-violet-400"><Scale className="w-4 h-4" /></span>
+              {t("finance.netWorthTitle")}
+            </h3>
+            <span className={`text-xl sm:text-2xl font-extrabold font-sans tabular-nums tracking-tight ${netWorth.total >= 0 ? "text-violet-300" : "text-rose-400"}`}>
+              {netWorth.total.toLocaleString()} đ
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            {[
+              { label: t("finance.netWorthWallet"),  value: netWorth.walletTotal,      emoji: "💰", neg: false, color: "text-slate-100" },
+              { label: t("finance.netWorthSavings"), value: netWorth.savingsTotal,     emoji: "🐷", neg: false, color: "text-emerald-400" },
+              { label: t("finance.netWorthLent"),    value: netWorth.lentRemaining,    emoji: "🤝", neg: false, color: "text-sky-400" },
+              { label: t("finance.netWorthDebt"),    value: netWorth.borrowedRemaining, emoji: "🏦", neg: true,  color: "text-rose-400" }
+            ].map(row => (
+              <div key={row.label} className="bg-slate-950/60 neu-pressed-sm rounded-xl p-3 min-w-0">
+                <span className="block text-[10px] text-slate-500 font-semibold truncate">{row.emoji} {row.label}</span>
+                <span className={`block mt-1 text-[13px] sm:text-base font-extrabold font-sans tabular-nums leading-tight break-words ${row.value === 0 ? "text-slate-500" : row.color}`}>
+                  {row.neg && row.value > 0 ? "-" : ""}{row.value.toLocaleString()} đ
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-slate-500 leading-relaxed">{t("finance.netWorthHint")}</p>
+        </Reveal>
+      )}
 
       {/* Mục tiêu tiết kiệm + Vay/cho mượn — desktop nằm ngang hàng cho gọn;
           items-start để mỗi thẻ cao theo nội dung riêng (danh sách dài ngắn khác nhau) */}
