@@ -1,0 +1,29 @@
+name: CI
+
+# Kiểm tra mỗi lần push/PR. KHÔNG build image — image chỉ build khi phát hành
+# (tag vX.Y.Z, xem release.yml), để máy đang chạy chỉ nhận bản đã phát hành.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - name: Kiểm tra cú pháp shell
+        run: sh -n deploy/updater.sh && bash -n scripts/release.sh

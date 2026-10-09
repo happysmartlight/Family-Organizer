@@ -1,16 +1,21 @@
+# Family Organizer — bản cài riêng (một stack chỉ có app này).
+# Cài chung stack homelab thì xem repo liu-homelab (cùng cơ chế cập nhật).
+#
+# .env cạnh file này cần có:
+#   STACK_DIR=<đường dẫn tuyệt đối tới thư mục này>   (vd /root/Family-Organizer)
+#   FAMILY_ORGANIZER_VERSION=<phiên bản>              (vd 1.0.0 — để trống = latest)
+# Sau đó mọi cập nhật làm trong app: Thiết lập → Hệ thống & Sao lưu → Phiên bản & Cập nhật.
+
 services:
   family-organizer:
-    # Pull the published image from GHCR so Watchtower can auto-update it.
-    # CI (.github/workflows/docker-publish.yml) builds & pushes this on every push to main.
-    # `build:` is kept so you can still build locally with `docker compose up -d --build`.
-    image: ghcr.io/happysmartlight/family-organizer:latest
+    # Image do CI build mỗi bản phát hành (.github/workflows/release.yml), tag = số phiên bản.
+    # Dịch vụ cập nhật đổi FAMILY_ORGANIZER_VERSION trong .env rồi kéo bản mới.
+    # `build:` để vẫn build tay được: docker compose up -d --build
+    image: ghcr.io/happysmartlight/family-organizer:${FAMILY_ORGANIZER_VERSION:-latest}
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        # Git metadata baked into the image so the "version" UI shows the real commit.
-        # Compose passes these from the host environment at build time.
-        # CI sets them explicitly; local builds read them from the shell below.
         GIT_SHA: ${GIT_SHA:-}
         APP_VERSION: ${APP_VERSION:-}
         BUILD_TIME: ${BUILD_TIME:-}
@@ -39,40 +44,46 @@ services:
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
       - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
       - VAPID_SUBJECT=${VAPID_SUBJECT:-}
-      # Self-update: the app's "Cập nhật ngay" button calls Watchtower's HTTP API.
-      - WATCHTOWER_URL=http://watchtower:8080
-      - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-}
+      # Repo GitHub để app đọc danh sách bản phát hành.
       - GITHUB_REPO=${GITHUB_REPO:-happysmartlight/Family-Organizer}
-    labels:
-      # Let Watchtower manage (auto-update) this container.
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower
+  # Nút "Cập nhật" trong app. Container này cầm docker socket (quyền ngang root)
+  # nên KHÔNG mở cổng mạng nào: chỉ đọc file yêu cầu trong data/update/ và chỉ
+  # đụng tới service family-organizer. Script tự tải lần đầu, sau đó tự thay
+  # bằng bản đi kèm mỗi phiên bản mới.
+  family-organizer-updater:
+    image: docker:28-cli
+    container_name: family-organizer-updater
     restart: unless-stopped
-    volumes:
-      # Needs the Docker socket to pull images and recreate containers.
-      - /var/run/docker.sock:/var/run/docker.sock
+    init: true
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        f="$$STACK_DIR/updater/updater.sh"
+        if [ ! -s "$$f" ]; then
+          mkdir -p "$$STACK_DIR/updater"
+          wget -qO "$$f.tmp" https://raw.githubusercontent.com/happysmartlight/Family-Organizer/main/deploy/updater.sh && mv "$$f.tmp" "$$f"
+        fi
+        exec /bin/sh "$$f"
     environment:
-      - WATCHTOWER_CLEANUP=true            # remove old images after update
-      - WATCHTOWER_LABEL_ENABLE=true       # only watch containers labelled above
-      - WATCHTOWER_POLL_INTERVAL=86400     # also auto-check once a day
-      - WATCHTOWER_HTTP_API_UPDATE=true    # enable the on-demand /v1/update endpoint
-      - WATCHTOWER_HTTP_API_PERIODIC_POLLS=true
-      - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-}
-      # Docker 29+ raised the minimum API version to 1.40; force Watchtower's old SDK to match.
-      - DOCKER_API_VERSION=1.40
-    # No host port needed: the app reaches Watchtower in-network via http://watchtower:8080.
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+      STACK_DIR: ${STACK_DIR:?Chưa đặt STACK_DIR trong .env (đường dẫn tuyệt đối tới thư mục chứa docker-compose.yml)}
+      APP_DATA: ${STACK_DIR}/data
+      SERVICE: family-organizer
+      VERSION_VAR: FAMILY_ORGANIZER_VERSION
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Đúng đường dẫn như trên host: docker compose gửi đường dẫn bind mount
+      # thẳng cho Docker daemon, daemon hiểu theo hệ thống file của host.
+      - ${STACK_DIR}:${STACK_DIR}
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "2m"
+        max-file: "2"

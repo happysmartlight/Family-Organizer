@@ -11,7 +11,8 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "seed:demo": "tsx scripts/seed-demo.ts"
+    "seed:demo": "tsx scripts/seed-demo.ts",
+    "release": "bash scripts/release.sh"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

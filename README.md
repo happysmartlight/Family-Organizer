@@ -32,8 +32,9 @@ Bất kỳ máy nào cài được **Docker** — chọn theo túi tiền và nh
   **Tailscale** để vào an toàn mà *không cần mở cổng router hay IP tĩnh*.
 - 📱 **Như một app điện thoại** — cài lên màn hình chính iPhone/Android (PWA), có
   thông báo đẩy, chạy toàn màn hình như ứng dụng thật.
-- ♻️ **Tự cập nhật & tự sao lưu** — Watchtower tự nâng cấp khi có bản mới; backup tự
-  động mỗi đêm, có thể gửi kèm ra Telegram để cất offsite.
+- ♻️ **Tự cập nhật & tự sao lưu** — bấm một nút trong app để lên bản mới (tự sao lưu
+  trước, bản mới lỗi thì tự quay về), hoặc bật tự cập nhật ban đêm; backup tự động mỗi
+  đêm, có thể gửi kèm ra Telegram để cất offsite.
 
 Xem hướng dẫn cài đặt chi tiết ở mục [🚀 Triển Khai Production (Raspberry Pi)](#-triển-khai-production-raspberry-pi) bên dưới.
 
@@ -150,7 +151,7 @@ Giao diện Neumorphism, hỗ trợ Light / Dark mode với hiệu ứng chuyể
 - Theo dõi CPU, RAM, nhiệt độ, ổ đĩa theo thời gian thực
 - Lịch sử 7 ngày dạng sparkline
 - Shortcut link tới các dịch vụ homelab (Immich, Portainer, v.v.)
-- Kiểm tra phiên bản + nút **Cập nhật ngay** (gọi Watchtower HTTP API)
+- Phiên bản & Cập nhật nằm ở **Thiết lập → Hệ thống & Sao lưu** (xem mục [Cập nhật](#cập-nhật))
 
 ### 🤖 Trợ Lý AI (Gemini)
 
@@ -195,7 +196,7 @@ Giao diện Neumorphism, hỗ trợ Light / Dark mode với hiệu ứng chuyể
 
 ## 🚀 Triển Khai Production (Raspberry Pi)
 
-Ứng dụng chạy từ image CI build và publish lên **GitHub Container Registry (GHCR)** mỗi khi có commit vào `main`. Watchtower tự động cập nhật khi có image mới.
+Ứng dụng chạy từ image CI build và publish lên **GitHub Container Registry (GHCR)** mỗi bản phát hành (tag `vX.Y.Z`). Container **`family-organizer-updater`** đi kèm lo việc cập nhật khi bấm nút trong app — không cần terminal sau lần cài đầu.
 
 ### Yêu cầu hệ thống
 
@@ -216,6 +217,7 @@ curl -fsSL https://get.docker.com | sudo sh
 git clone https://github.com/happysmartlight/Family-Organizer.git
 cd Family-Organizer
 cp .env.example .env
+echo "STACK_DIR=$PWD" >> .env   # dịch vụ cập nhật cần đường dẫn tuyệt đối của thư mục này
 nano .env
 ```
 
@@ -288,13 +290,29 @@ Dùng chính địa chỉ HTTPS này khi **Cài lên màn hình chính (PWA)** v
 
 ### Cập nhật
 
-**Qua giao diện (khuyến nghị):** Settings → Phiên bản & Cập nhật → **Cập nhật ngay**
+Vào **Thiết lập → Hệ thống & Sao lưu → Phiên bản & Cập nhật** (Admin):
 
-**Thủ công:**
+- Danh sách phiên bản kèm ghi chú thay đổi (lấy từ GitHub Releases), app tự kiểm tra mỗi 6 giờ.
+- **Cập nhật ngay**: app chụp lại database → container `family-organizer-updater` kéo image
+  mới, khởi động lại, chờ `/api/health` báo đúng phiên bản. Bản mới không lên được → **tự quay
+  về bản cũ** và khôi phục database lúc trước khi cập nhật.
+- **Quay về** bất kỳ bản cũ nào, tùy chọn khôi phục cả dữ liệu từ bản chụp trước cập nhật.
+- **Tự cập nhật ban đêm** theo giờ chọn; báo qua Telegram nếu đã cấu hình bot.
+- Mọi máy đang mở app thấy banner **"Đã có bản mới vX.Y.Z"** để tải lại.
+
+Dịch vụ cập nhật không mở cổng mạng: app và nó trao đổi qua file trong `data/update/`
+(script: [deploy/updater.sh](deploy/updater.sh)). Phiên bản đang chạy nằm ở biến
+`FAMILY_ORGANIZER_VERSION` trong `.env` — đừng sửa tay khi đã dùng nút cập nhật.
+
+**Thủ công** (khi dịch vụ cập nhật không chạy):
 
 ```bash
-cd ~/Family-Organizer && git pull && docker compose pull && docker compose up -d
+cd ~/Family-Organizer && sed -i 's/^FAMILY_ORGANIZER_VERSION=.*/FAMILY_ORGANIZER_VERSION=1.2.3/' .env && docker compose up -d
 ```
+
+**Phát hành bản mới (người phát triển):** thêm mục `## [X.Y.Z]` vào [CHANGELOG.md](CHANGELOG.md)
+→ `npm run release -- X.Y.Z` → `git push && git push --tags`. GitHub Actions build image arm64 +
+tạo Release; app trên máy chủ thấy bản mới trong trang Cập nhật.
 
 ---
 
@@ -409,13 +427,14 @@ Các biến đặt trong file `.env` ở thư mục gốc (được `docker-comp
 
 | Biến | Bắt buộc | Mô tả |
 | :--- | :---: | :--- |
-| `WATCHTOWER_HTTP_API_TOKEN` | Có* | Token xác thực Watchtower — cần cho nút "Cập nhật ngay". Tạo bằng `openssl rand -hex 24` |
+| `STACK_DIR` | Có | Đường dẫn tuyệt đối tới thư mục chứa `docker-compose.yml` — dịch vụ cập nhật cần để chạy `docker compose` |
+| `FAMILY_ORGANIZER_VERSION` | Không | Phiên bản image đang chạy (vd `1.0.0`); trống = `latest`. Nút cập nhật tự đổi biến này |
 | `GEMINI_API_KEY` | Không | Fallback Gemini key khi chưa cấu hình qua Settings UI |
 | `VAPID_PUBLIC_KEY` | Không | VAPID public key — bật thông báo đẩy PWA |
 | `VAPID_PRIVATE_KEY` | Không | VAPID private key |
 | `VAPID_SUBJECT` | Không | Email liên hệ cho VAPID (dạng `mailto:you@example.com`) |
 | `APP_URL` | Không | URL ngoài của app — dùng cho deep-link trong thông báo đẩy |
-| `GITHUB_REPO` | Không | Repo GitHub để kiểm tra commit mới nhất (mặc định: `happysmartlight/Family-Organizer`) |
+| `GITHUB_REPO` | Không | Repo GitHub để đọc danh sách bản phát hành (mặc định: `happysmartlight/Family-Organizer`) |
 
 > **Gemini key và cấu hình Telegram** được quản lý qua **Settings → Thiết lập AI / Telegram** trong giao diện — lưu vào `app_settings.json`, không vào backup. Biến môi trường `GEMINI_API_KEY` chỉ là fallback nếu chưa nhập qua UI.
 > **VAPID keys** tạo bằng: `npx web-push generate-vapid-keys`
@@ -468,7 +487,7 @@ docker compose up -d
 | **AI** | Google GenAI SDK 2 (Gemini 2.5 Flash) |
 | **Notifications** | Web Push / VAPID, SSE |
 | **Export** | pdfmake 0.3 (báo cáo tài chính), archiver 8 (ZIP backup) |
-| **Container** | Docker multi-stage (Alpine), Watchtower, GHCR |
+| **Container** | Docker multi-stage (Alpine), GHCR, dịch vụ cập nhật riêng (`docker:cli` + sh) |
 | **Testing** | Vitest 4 |
 
 ---

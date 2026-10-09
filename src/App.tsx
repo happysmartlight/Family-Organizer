@@ -26,7 +26,8 @@ import {
   ShoppingCart,
   FolderLock,
   HeartPulse,
-  Cpu
+  Cpu,
+  RefreshCw
 } from "lucide-react";
 import {
   User,
@@ -72,8 +73,9 @@ import { ServerMonitor } from "./components/ServerMonitor.js";
 import { GlobalSearch } from "./components/GlobalSearch.js";
 import { useModalA11y } from "./hooks/useModalA11y.js";
 import { reloadOnce, scheduleReloadFallback } from "./utils/appReload.js";
+import { type AppVersionInfo, fetchAppVersion as fetchServerVersion, reloadIntoNewVersion, versionFingerprint } from "./utils/appVersion.js";
 import { DEFAULT_VN_LOCATION, findVnLocation } from "./utils/vnLocations.js";
-import { motion, AnimatePresence } from "motion/react";
+import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
 type SettingsTab = "profile" | "members" | "backups" | "logs";
@@ -295,8 +297,8 @@ export default function App() {
       swWaiting.postMessage("SKIP_WAITING");
       scheduleReloadFallback(3000);
     } else {
-      // New build live but no waiting SW: a network-first reload fetches it.
-      reloadOnce();
+      // New build live but no waiting SW: dọn cache cũ rồi reload (network-first lấy bản mới).
+      void reloadIntoNewVersion();
     }
   };
   
@@ -326,9 +328,10 @@ export default function App() {
   const [networkOnline, setNetworkOnline] = useState<boolean>(typeof navigator !== "undefined" ? navigator.onLine : true);
   const [installPrompt, setInstallPrompt] = useState<any>(null);
   const [swWaiting, setSwWaiting] = useState<ServiceWorker | null>(null);
-  // True once the server reports a build newer than the one this client booted with.
-  const [updateReady, setUpdateReady] = useState(false);
-  const bootCommitRef = useRef<string | null>(null);
+  // Bản máy chủ đang chạy khi nó khác bản trang này đã nạp (null = chưa có bản mới).
+  const [updateReady, setUpdateReady] = useState<AppVersionInfo | null>(null);
+  const bootFingerprintRef = useRef<string | null>(null);
+  const reduceMotion = useReducedMotion();
 
   useEffect(() => {
     if (!currentUser) return;
@@ -737,22 +740,16 @@ export default function App() {
   };
 
   const fetchAppVersion = async () => {
-    try {
-      const res = await fetch("/api/version", { headers: getAuthHeader(), cache: "no-store" });
-      if (!res.ok) return;
-      const d = await res.json();
-      setAppVersion(d.shortCommit || d.version || "");
-      if (typeof d.rewardsEnabled === "boolean") setRewardsEnabled(d.rewardsEnabled);
-      if (typeof d.rewardApprovalThreshold === "number") setRewardApprovalThreshold(d.rewardApprovalThreshold);
-      const commit: string = d.commit || "";
-      if (!commit) return; // dev/local build → can't compare reliably
-      if (bootCommitRef.current === null) {
-        bootCommitRef.current = commit; // remember the build this client loaded with
-      } else if (commit !== bootCommitRef.current) {
-        setUpdateReady(true); // a newer build is live on the server
-      }
-    } catch (e) {
-      // version is non-critical; ignore
+    const d = await fetchServerVersion();
+    if (!d) return; // version is non-critical; ignore
+    setAppVersion(d.version || "");
+    if (typeof d.rewardsEnabled === "boolean") setRewardsEnabled(d.rewardsEnabled);
+    if (typeof d.rewardApprovalThreshold === "number") setRewardApprovalThreshold(d.rewardApprovalThreshold);
+    const fp = versionFingerprint(d);
+    if (bootFingerprintRef.current === null) {
+      bootFingerprintRef.current = fp; // nhớ bản trang này đã nạp
+    } else if (fp !== bootFingerprintRef.current) {
+      setUpdateReady(d); // máy chủ đã chạy bản khác → banner "Đã có bản mới"
     }
   };
 
@@ -1724,14 +1721,30 @@ export default function App() {
         </div>
       )}
 
-      {/* PWA: update available (new SW waiting, or server build is newer than ours) */}
+      {/* PWA: update available (máy chủ chạy bản khác bản đã nạp, hoặc SW mới đang chờ).
+          Mobile: chừa cột phải cho nút trợ lý AI + FAB; từ sm trở lên căn giữa. */}
       {(swWaiting || updateReady) && (
-        <button
-          onClick={handleApplyUpdate}
-          className="fixed left-1/2 -translate-x-1/2 z-[70] bottom-[calc(1rem+env(safe-area-inset-bottom))] bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-bold px-4 py-2 rounded-full shadow-lg flex items-center gap-1.5 cursor-pointer"
-        >
-          <Sparkles className="w-4 h-4" /> Đã có bản mới — Bấm để cập nhật
-        </button>
+        <div className="fixed z-[70] left-4 right-[5.5rem] bottom-[calc(1rem+env(safe-area-inset-bottom))] sm:left-1/2 sm:right-auto sm:w-[22rem] sm:-translate-x-1/2 pointer-events-none">
+          <motion.button
+            type="button"
+            onClick={handleApplyUpdate}
+            initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 16, scale: 0.96 }}
+            animate={reduceMotion ? { opacity: 1 } : { opacity: 1, y: 0, scale: 1 }}
+            transition={reduceMotion ? { duration: 0.2 } : { type: "spring", stiffness: 320, damping: 26 }}
+            className="pointer-events-auto w-full flex items-center gap-3 rounded-2xl bg-sky-500 hover:bg-sky-400 text-slate-950 pl-2.5 pr-3.5 py-2.5 shadow-2xl shadow-sky-500/30 text-left cursor-pointer transition-colors"
+          >
+            <span className="p-2 rounded-xl bg-slate-950/15 shrink-0">
+              <Sparkles className="w-4 h-4" />
+            </span>
+            <span className="min-w-0 flex-1 leading-tight">
+              <span className="block text-xs font-extrabold truncate">
+                {updateReady?.version ? `Đã có bản mới v${updateReady.version}` : "Đã có bản mới"}
+              </span>
+              <span className="block text-[11px] font-semibold opacity-80">Bấm để tải lại</span>
+            </span>
+            <RefreshCw className="w-4 h-4 shrink-0" />
+          </motion.button>
+        </div>
       )}
 
       {/* Visual glowing particle effects */}

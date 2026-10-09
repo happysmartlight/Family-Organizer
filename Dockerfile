@@ -37,9 +37,10 @@ RUN apk add --no-cache libstdc++
 # Create a directory to store persistent data (database + backups)
 RUN mkdir -p /app/data && chown -R node:node /app/data
 
-# Version metadata baked at build time (CI passes the git SHA + timestamp).
-# Falls back to "dev" for a plain local `docker compose up --build`.
-ARG APP_VERSION=dev
+# Dấu vân tay bản build — CI (release.yml) truyền semver từ tag + commit + giờ build;
+# trang Phiên bản & Cập nhật dùng để so phiên bản. Build tay để trống → app lấy
+# version trong package.json.
+ARG APP_VERSION=
 ARG GIT_SHA=
 ARG BUILD_TIME=
 ENV APP_VERSION=$APP_VERSION
@@ -60,6 +61,11 @@ EXPOSE 3000
 
 # Run container as non-root user for security
 USER node
+
+# Docker tự biết app còn sống không; dịch vụ cập nhật cũng dựa vào /api/health
+# để xác nhận bản mới đã lên (sai → tự quay về bản cũ).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --start-interval=3s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${PORT:-3000}/api/health" >/dev/null 2>&1 || exit 1
 
 # Start full-stack system
 CMD ["npm", "start"]

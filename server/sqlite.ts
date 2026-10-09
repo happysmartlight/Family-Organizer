@@ -121,6 +121,11 @@ export const sqliteSave = db.transaction((data: FamilyOrganizerDB) => {
   }
 }) as unknown as (data: FamilyOrganizerDB) => void;
 
+/** Chụp nguyên file SQLite (gồm cả phần đang nằm trong WAL) ra `dest` — dùng trước khi cập nhật app. */
+export async function sqliteBackupTo(dest: string): Promise<void> {
+  await db.backup(dest);
+}
+
 export function sqliteCheckpoint(): void {
   try {
     db.pragma("wal_checkpoint(TRUNCATE)");

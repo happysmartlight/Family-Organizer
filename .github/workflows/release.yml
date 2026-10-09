@@ -1,0 +1,87 @@
+name: Release
+
+# Tạo tag vX.Y.Z → build image arm64 cho Pi 5 → đẩy lên GHCR → tạo GitHub Release
+# với ghi chú lấy từ CHANGELOG.md. App trên Pi thấy bản mới trong
+# Thiết lập → Hệ thống & Sao lưu → Phiên bản & Cập nhật.
+#   npm run release -- 1.1.0     (xem scripts/release.sh)
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # GHCR bắt buộc chữ thường (tên repo GitHub có chữ hoa).
+  IMAGE: ghcr.io/happysmartlight/family-organizer
+
+jobs:
+  image:
+    # Runner ARM64 native (miễn phí cho repo public): build thẳng cho Pi 5,
+    # không cần giả lập QEMU — nhanh hơn và tránh lỗi "Illegal instruction"
+    # khi npm/V8 (Node 22) chạy dưới QEMU.
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Phiên bản
+        id: v
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "$PKG" ]; then echo "::error::Tag v$VERSION khác version package.json ($PKG)"; exit 1; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "minor=$(echo "$VERSION" | cut -d. -f1,2)" >> "$GITHUB_OUTPUT"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Ghi chú phát hành từ CHANGELOG.md
+        run: |
+          # So khớp chuỗi (index), không dùng regex: "[" và "." trong regex awk dễ khớp nhầm mục khác.
+          awk -v v="${{ steps.v.outputs.version }}" '
+            index($0, "## [" v "]") == 1 || index($0, "## " v " ") == 1 {on=1; next}
+            on && /^## / {exit}
+            on {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          [ -s RELEASE_NOTES.md ] || echo "Cập nhật v${{ steps.v.outputs.version }}" > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push (Raspberry Pi 5 = arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
+            ${{ env.IMAGE }}:${{ steps.v.outputs.minor }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            APP_VERSION=${{ steps.v.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+            BUILD_TIME=${{ steps.v.outputs.time }}
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.v.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ contains(steps.v.outputs.version, '-') }}

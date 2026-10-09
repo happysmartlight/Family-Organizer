@@ -21,6 +21,7 @@ import { telegramBackupStatus, sendBackupToTelegram, runTelegramBackupTick } fro
 import { sendWeeklyDigest, runWeeklyDigestTick } from "./server/weeklyDigest.js";
 import { icsFeedToken, isValidIcsToken, buildIcsFeed } from "./server/icsFeed.js";
 import { getVapidPublicKey, isPushConfigured, sendTestPush } from "./server/push.js";
+import { BUILD, checkReleases, getUpdateOverview, requestRestart, runUpdateTick, setAutoUpdate, startUpdate, updateAvailable, compareVersions } from "./server/updater.js";
 
 // Accepted permission roles for write validation
 const VALID_ROLES = new Set<string>([UserRole.ADMIN, UserRole.MEMBER, UserRole.CHILD, UserRole.GUEST]);
@@ -72,18 +73,6 @@ function validateAssetPhotosPayload(photos: unknown) {
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-
-// --- VERSION / UPDATE CONFIG ---
-// APP_VERSION/GIT_SHA/BUILD_TIME are baked into the image at build time (see Dockerfile + CI).
-const APP_VERSION = process.env.APP_VERSION || "dev";
-const GIT_SHA = process.env.GIT_SHA || "";
-const BUILD_TIME = process.env.BUILD_TIME || "";
-// GitHub repo used to check whether a newer commit exists on the default branch.
-const GITHUB_REPO = process.env.GITHUB_REPO || "happysmartlight/Family-Organizer";
-const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
-// Optional Watchtower HTTP API for one-click in-app updates.
-const WATCHTOWER_URL = process.env.WATCHTOWER_URL || "";
-const WATCHTOWER_TOKEN = process.env.WATCHTOWER_HTTP_API_TOKEN || "";
 
 // --- GEMINI API KEY ---
 // Admin can set a key from the UI (stored in app_settings.json); falls back to env.
@@ -362,63 +351,86 @@ function rewardsFeatureEnabled(): boolean {
 }
 
 // --- VERSION & SELF-UPDATE ---
+// Cơ chế cập nhật: server/updater.ts (app) + deploy/updater.sh (container sidecar).
+
+// Health check cho Docker HEALTHCHECK + dịch vụ cập nhật (chờ bản mới lên đúng phiên bản).
+// Không cần đăng nhập, không lộ gì ngoài số phiên bản.
+app.get("/api/health", (_req: Request, res: Response) => {
+  res.json({ ok: true, version: BUILD.version });
+});
 
 app.get("/api/version", requireAuth, (_req: AuthRequest, res: Response) => {
   res.json({
-    version: APP_VERSION,
-    commit: GIT_SHA,
-    shortCommit: GIT_SHA ? GIT_SHA.slice(0, 7) : "",
-    buildTime: BUILD_TIME,
-    canAutoUpdate: Boolean(WATCHTOWER_URL && WATCHTOWER_TOKEN),
+    version: BUILD.version,
+    commit: BUILD.commit,
+    shortCommit: BUILD.commit ? BUILD.commit.slice(0, 7) : "",
+    buildTime: BUILD.buildTime,
     aiEnabled: Boolean(getGeminiKey()),
     rewardsEnabled: rewardsFeatureEnabled(),
     rewardApprovalThreshold: Math.max(0, Number(getAppSettings().rewardApprovalThreshold || 0))
   });
 });
 
-// Compare the running build's commit against the latest commit on the GitHub branch.
-app.get("/api/version/check", requireAuth, async (_req: AuthRequest, res: Response) => {
+app.get("/api/system/update", requireAuth, requireRole([UserRole.ADMIN]), (_req: AuthRequest, res: Response) => {
+  res.json(getUpdateOverview());
+});
+
+app.post("/api/system/update/check", requireAuth, requireRole([UserRole.ADMIN]), async (_req: AuthRequest, res: Response) => {
   try {
-    const url = `https://api.github.com/repos/${GITHUB_REPO}/commits/${GITHUB_BRANCH}`;
-    const headers: Record<string, string> = { Accept: "application/vnd.github+json", "User-Agent": "family-organizer" };
-    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-    const ghRes = await fetch(url, { headers });
-    if (!ghRes.ok) throw new Error(`GitHub trả về mã ${ghRes.status}`);
-    const data: any = await ghRes.json();
-    const latestSha: string = data.sha || "";
-    const message: string = (data.commit?.message || "").split("\n")[0];
-    const date: string = data.commit?.committer?.date || data.commit?.author?.date || "";
-    res.json({
-      currentCommit: GIT_SHA ? GIT_SHA.slice(0, 7) : "",
-      latestCommit: latestSha ? latestSha.slice(0, 7) : "",
-      // null = can't tell (running an un-versioned local/dev build)
-      updateAvailable: GIT_SHA ? (Boolean(latestSha) && latestSha !== GIT_SHA) : null,
-      latestMessage: message,
-      latestDate: date,
-      canAutoUpdate: Boolean(WATCHTOWER_URL && WATCHTOWER_TOKEN)
-    });
+    await checkReleases();
+    res.json({ available: updateAvailable() });
   } catch (err: any) {
-    res.status(502).json({ error: err.message || "Không kiểm tra được cập nhật." });
+    res.status(502).json({ error: err.message || "Không kiểm tra được bản mới." });
   }
 });
 
-// Trigger Watchtower to pull the newest image and restart the app (admin only).
-app.post("/api/update", requireAuth, requireRole([UserRole.ADMIN]), async (_req: AuthRequest, res: Response) => {
-  if (!WATCHTOWER_URL || !WATCHTOWER_TOKEN) {
-    res.status(400).json({ error: "Chưa cấu hình Watchtower trên máy chủ (WATCHTOWER_URL / WATCHTOWER_HTTP_API_TOKEN)." });
-    return;
-  }
+app.put("/api/system/update/config", requireAuth, requireRole([UserRole.ADMIN]), (req: AuthRequest, res: Response) => {
   try {
-    const ghRes = await fetch(`${WATCHTOWER_URL.replace(/\/$/, "")}/v1/update`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${WATCHTOWER_TOKEN}` }
-    });
-    if (!ghRes.ok) throw new Error(`Watchtower trả về mã ${ghRes.status}`);
-    res.json({ success: true, message: "Đã yêu cầu cập nhật. Ứng dụng sẽ tải bản mới và khởi động lại trong giây lát." });
+    const autoUpdate = req.body?.autoUpdate === true;
+    const autoUpdateHour = Number(req.body?.autoUpdateHour);
+    setAutoUpdate(autoUpdate, autoUpdateHour);
+    const s = req.userSession!;
+    FamilyDB.logActivity(s.userId, s.username, "Cấu hình cập nhật", autoUpdate ? `Bật tự cập nhật lúc ${autoUpdateHour}:00.` : "Tắt tự cập nhật.");
+    res.json({ success: true });
   } catch (err: any) {
-    res.status(502).json({ error: err.message || "Không kích hoạt được cập nhật tự động." });
+    res.status(400).json({ error: err.message || "Không lưu được cấu hình cập nhật." });
   }
 });
+
+app.post("/api/system/update/apply", requireAuth, requireRole([UserRole.ADMIN]), async (req: AuthRequest, res: Response) => {
+  const version = String(req.body?.version || "").trim();
+  const restoreSnapshot = req.body?.restoreSnapshot ? String(req.body.restoreSnapshot) : null;
+  try {
+    const downgrade = compareVersions(version, BUILD.version) < 0;
+    const result = await startUpdate(version, { restoreSnapshot, reason: downgrade ? "rollback" : "manual" });
+    const s = req.userSession!;
+    FamilyDB.logActivity(
+      s.userId,
+      s.username,
+      downgrade ? "Quay về bản cũ" : "Cập nhật ứng dụng",
+      `v${BUILD.version} → v${version}${restoreSnapshot ? " (khôi phục dữ liệu trước cập nhật)" : ""}. Đã sao lưu ${result.snapshot}.`
+    );
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || "Không bắt đầu cập nhật được." });
+  }
+});
+
+app.post("/api/system/restart", requireAuth, requireRole([UserRole.ADMIN]), (req: AuthRequest, res: Response) => {
+  try {
+    const requestId = requestRestart();
+    const s = req.userSession!;
+    FamilyDB.logActivity(s.userId, s.username, "Khởi động lại ứng dụng", "Yêu cầu dịch vụ cập nhật khởi động lại app.");
+    res.json({ requestId });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || "Không gửi được yêu cầu khởi động lại." });
+  }
+});
+
+// Kiểm tra bản mới mỗi 6 giờ, báo Telegram, tự cập nhật ban đêm (nếu bật),
+// báo kết quả sau khi cập nhật xong. Vòng 5 phút (rẻ: chỉ đọc vài file nhỏ).
+setTimeout(() => void runUpdateTick(), 30 * 1000);
+setInterval(() => void runUpdateTick(), 5 * 60 * 1000);
 
 // --- SERVER MONITOR (thông số máy chủ realtime, admin only) ---
 // Chạy trong Docker trên Pi: /proc & /sys phản ánh máy chủ thật nên CPU/RAM/nhiệt độ
@@ -663,8 +675,8 @@ app.get("/api/server/stats", requireAuth, requireRole([UserRole.ADMIN]), async (
       network: { interfaces: listNetworkAddrs(), clientIp: readClientIp(req) },
       // Ứng dụng & dữ liệu
       app: {
-        version: APP_VERSION,
-        commit: GIT_SHA ? GIT_SHA.slice(0, 7) : "",
+        version: BUILD.version,
+        commit: BUILD.commit ? BUILD.commit.slice(0, 7) : "",
         nodeVersion: process.version,
         processUptimeSec: Math.round(process.uptime()),
         rssBytes: process.memoryUsage.rss()

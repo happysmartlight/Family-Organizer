@@ -16,3 +16,6 @@ data/
 .code-review-graph/
 .mcp.json
 .claude/
+
+# Script dịch vụ cập nhật (bản cài riêng tự tải về khi chạy compose)
+updater/

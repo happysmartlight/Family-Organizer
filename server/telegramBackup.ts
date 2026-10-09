@@ -62,6 +62,13 @@ async function sendTelegramText(token: string, chatId: string, text: string): Pr
   } catch { /* thông báo phụ — bỏ qua nếu lỗi */ }
 }
 
+/** Gửi một thông báo ngắn tới chat Telegram đã cấu hình (vd cập nhật app). Chưa cấu hình thì bỏ qua. */
+export async function notifyTelegram(text: string): Promise<void> {
+  const s = getAppSettings();
+  if (!s.telegramBotToken || !s.telegramChatId) return;
+  await sendTelegramText(s.telegramBotToken, s.telegramChatId, text);
+}
+
 /**
  * Đóng gói backup toàn phần ra file tạm rồi gửi qua Telegram sendDocument.
  * Trả về mô tả kết quả để hiển thị trong Thiết lập; ném Error khi thất bại.

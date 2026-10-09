@@ -24,7 +24,6 @@ import {
   KeyRound,
   Pencil,
   Tag,
-  Rocket,
   Sparkles,
   MapPin,
   Archive,
@@ -76,8 +75,8 @@ import { useConfirm } from "./ConfirmDialog.js";
 import { Avatar } from "./Avatar.js";
 import { optimizeImageFile } from "../utils/image.js";
 import { uploadDataUrl } from "../utils/uploadImage.js";
-import { reloadOnce, scheduleReloadFallback } from "../utils/appReload.js";
 import { PushNotificationsCard } from "./PushNotificationsCard.js";
+import { UpdatePanel } from "./UpdatePanel.js";
 import { ShimmerLine, Reveal } from "./Lively.js";
 import { DateInputDMY, formatDateVN } from "./DateTimePicker24.js";
 import { VN_LOCATIONS } from "../utils/vnLocations.js";
@@ -441,13 +440,6 @@ export function Settings({
   const [actionSuccess, setActionSuccess] = useState("");
   const [actionError, setActionError] = useState("");
 
-  // Version & self-update state
-  const [versionInfo, setVersionInfo] = useState<any>(null);
-  const [updateCheck, setUpdateCheck] = useState<any>(null);
-  const [updateBusy, setUpdateBusy] = useState<"" | "check" | "apply" | "deploying">("");
-  const [updateMsg, setUpdateMsg] = useState("");
-  const [updateDone, setUpdateDone] = useState(false);
-
   // Toggle tính năng Điểm thưởng cho trẻ — admin only
   const [rewardsBusy, setRewardsBusy] = useState(false);
   const [rewardsErr, setRewardsErr] = useState("");
@@ -512,10 +504,6 @@ export function Settings({
   useModalA11y(!!resetTarget, closeResetTarget, resetTargetRef);
 
   useEffect(() => {
-    fetch("/api/version", { headers: authHeaders() })
-      .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (d) setVersionInfo(d); })
-      .catch(() => {});
     fetch("/api/calendar/feed-info", { headers: authHeaders() })
       .then(r => (r.ok ? r.json() : null))
       .then(d => { if (d?.token) setIcsToken(d.token); })
@@ -627,112 +615,6 @@ export function Settings({
       setAiKeyErr(err.message || "Lưu key thất bại.");
     } finally {
       setAiKeyBusy(false);
-    }
-  };
-
-  const handleCheckUpdate = async () => {
-    setUpdateBusy("check");
-    setUpdateMsg("");
-    try {
-      const res = await fetch("/api/version/check", { headers: authHeaders() });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Không kiểm tra được cập nhật.");
-      setUpdateCheck(data);
-    } catch (err: any) {
-      setUpdateCheck(null);
-      setUpdateMsg(err.message || "Không kiểm tra được cập nhật.");
-    } finally {
-      setUpdateBusy("");
-    }
-  };
-
-  // Poll /api/version until the server reports a different commit (= new image is
-  // live). Tolerates the brief downtime while the container pulls & restarts.
-  const waitForNewVersion = async (fromCommit: string): Promise<boolean> => {
-    const startedAt = Date.now();
-    const TIMEOUT_MS = 4 * 60 * 1000; // give the Pi up to 4 minutes to pull + boot
-    const POLL_MS = 3000;
-    while (Date.now() - startedAt < TIMEOUT_MS) {
-      await new Promise(r => setTimeout(r, POLL_MS));
-      const elapsed = Math.round((Date.now() - startedAt) / 1000);
-      setUpdateMsg(`Đang tải bản mới & khởi động lại máy chủ… (${elapsed}s)`);
-      try {
-        const res = await fetch("/api/version", { headers: authHeaders(), cache: "no-store" });
-        if (res.ok) {
-          const d = await res.json();
-          if (d?.commit && fromCommit && d.commit !== fromCommit) {
-            setVersionInfo(d);
-            return true;
-          }
-        }
-      } catch {
-        // server is restarting — keep waiting
-      }
-    }
-    return false;
-  };
-
-  // Pull the freshest service worker + assets, then reload into the new build.
-  // Bản mới đã được xác nhận đang chạy trên máy chủ trước khi gọi hàm này.
-  const reloadIntoNewVersion = async () => {
-    try {
-      if ("serviceWorker" in navigator) {
-        const reg = await navigator.serviceWorker.getRegistration();
-        if (reg) {
-          await reg.update().catch(() => {});
-          // Nếu có SW mới đang chờ: kích hoạt nó (controllerchange sẽ reload),
-          // kèm dự phòng. Nếu không có: reload thẳng (network-first lấy bản mới).
-          if (reg.waiting) {
-            reg.waiting.postMessage("SKIP_WAITING");
-            scheduleReloadFallback(3000);
-            return;
-          }
-        }
-      }
-    } catch {
-      /* ignore — reload still fetches fresh index.html (network-first) */
-    }
-    reloadOnce();
-  };
-
-  const handleApplyUpdate = async () => {
-    const fromCommit: string = versionInfo?.commit || "";
-    setUpdateDone(false);
-    setUpdateBusy("apply");
-    setUpdateMsg("Đang gửi yêu cầu cập nhật…");
-    try {
-      // Kích hoạt update. Watchtower thường tải image mới & RESTART container app
-      // ngay trong lúc xử lý yêu cầu này → kết nối bị cắt và fetch ném
-      // TypeError("Failed to fetch") DÙ update đã chạy thành công. Vì vậy chỉ coi
-      // là lỗi thật khi server phản hồi rõ ràng (vd Watchtower chưa cấu hình);
-      // lỗi mạng thì xem như đã kích hoạt và chuyển sang chờ bản mới lên.
-      try {
-        const res = await fetch("/api/update", { method: "POST", headers: authHeaders() });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || "Cập nhật thất bại.");
-        }
-      } catch (err: any) {
-        // TypeError = lỗi mạng (kết nối bị cắt do container đang restart) → tiếp tục chờ.
-        // Lỗi khác (từ nhánh !res.ok ở trên) = lỗi thật → báo ra ngoài.
-        if (!(err instanceof TypeError)) throw err;
-      }
-
-      setUpdateBusy("deploying");
-      setUpdateMsg("Đã yêu cầu cập nhật. Đang chờ máy chủ tải bản mới…");
-
-      const ok = await waitForNewVersion(fromCommit);
-      if (ok) {
-        setUpdateDone(true);
-        setUpdateMsg("Cập nhật xong! Đang tải lại ứng dụng…");
-        await reloadIntoNewVersion();
-      } else {
-        setUpdateBusy("");
-        setUpdateMsg("Đã kích hoạt cập nhật nhưng chờ hơi lâu. Hãy thử tải lại trang sau ít phút.");
-      }
-    } catch (err: any) {
-      setUpdateBusy("");
-      setUpdateMsg(err.message || "Cập nhật thất bại.");
     }
   };
 
@@ -2179,89 +2061,8 @@ export function Settings({
         </div>
       )}
 
-      {/* Version & self-update */}
-      {activeTab === "backups" && (
-      <div className="bg-slate-950 neu-pressed-sm rounded-2xl p-4.5 space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="space-y-0.5">
-            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-              <Tag className="w-4 h-4 text-sky-400" /> Phiên bản & Cập nhật
-            </h3>
-            <p className="text-[11px] text-slate-500 font-mono">
-              {versionInfo
-                ? `Bản: ${versionInfo.shortCommit || versionInfo.version}${versionInfo.buildTime ? ` • build ${new Date(versionInfo.buildTime).toLocaleString("vi-VN")}` : ""}`
-                : "Đang tải thông tin phiên bản..."}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={handleCheckUpdate}
-            disabled={updateBusy !== ""}
-            className="bg-slate-800 hover:bg-slate-700 text-sky-400 text-xs px-3.5 py-2 rounded-xl font-bold flex items-center gap-1.5 transition-all self-start sm:self-auto shrink-0 cursor-pointer disabled:opacity-50"
-          >
-            <RefreshCw className={`w-4 h-4 ${updateBusy === "check" ? "animate-spin" : ""}`} />
-            {updateBusy === "check" ? "Đang kiểm tra..." : "Kiểm tra cập nhật"}
-          </button>
-        </div>
-
-        {updateCheck && (
-          <div className="text-xs">
-            {updateCheck.updateAvailable === true ? (
-              <div className="p-3 bg-amber-500/10 border border-amber-500/20 text-amber-300 rounded-xl space-y-2">
-                <p className="font-semibold flex items-center gap-1.5">
-                  <Rocket className="w-4 h-4" /> Có bản mới! ({updateCheck.currentCommit || "?"} → {updateCheck.latestCommit})
-                </p>
-                {updateCheck.latestMessage && <p className="text-amber-200/80 font-mono text-[11px]">“{updateCheck.latestMessage}”</p>}
-
-                {currentUser.role === UserRole.ADMIN && updateCheck.canAutoUpdate && (
-                  <button
-                    type="button"
-                    onClick={handleApplyUpdate}
-                    disabled={updateBusy !== ""}
-                    className="bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs px-3.5 py-2 rounded-xl font-bold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
-                  >
-                    {updateBusy === "apply" || updateBusy === "deploying"
-                      ? <RefreshCw className="w-4 h-4 animate-spin" />
-                      : <Rocket className="w-4 h-4" />}
-                    {updateBusy === "apply" ? "Đang gửi yêu cầu…" : updateBusy === "deploying" ? "Đang cập nhật…" : "Cập nhật ngay"}
-                  </button>
-                )}
-                {!updateCheck.canAutoUpdate && (
-                  <p className="text-amber-200/70 text-[11px]">
-                    Tự động cập nhật chưa bật. Trên Pi chạy: <code className="bg-slate-900 px-1.5 py-0.5 rounded font-mono">docker compose pull &amp;&amp; docker compose up -d</code>
-                  </p>
-                )}
-              </div>
-            ) : updateCheck.updateAvailable === false ? (
-              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-xl flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 shrink-0" /> Bạn đang dùng phiên bản mới nhất.
-              </div>
-            ) : (
-              <div className="p-3 bg-slate-800/60 border border-slate-700 text-slate-400 rounded-xl">
-                Bản đang chạy là bản dev/local nên không so sánh được với GitHub. (Mới nhất trên GitHub: {updateCheck.latestCommit || "?"})
-              </div>
-            )}
-          </div>
-        )}
-
-        {updateMsg && (
-          <div className={`p-3 rounded-xl text-xs flex items-center gap-2 border ${
-            updateDone
-              ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
-              : updateBusy === "deploying" || updateBusy === "apply"
-                ? "bg-sky-500/10 border-sky-500/20 text-sky-300"
-                : "bg-amber-500/10 border-amber-500/20 text-amber-300"
-          }`}>
-            {updateDone
-              ? <CheckCircle className="w-4 h-4 shrink-0" />
-              : (updateBusy === "deploying" || updateBusy === "apply")
-                ? <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
-                : <AlertTriangle className="w-4 h-4 shrink-0" />}
-            {updateMsg}
-          </div>
-        )}
-      </div>
-      )}
+      {/* Phiên bản & Cập nhật (admin: cập nhật / quay về / tự cập nhật; người khác: chỉ xem số phiên bản) */}
+      {activeTab === "backups" && <UpdatePanel isAdmin={currentUser.role === UserRole.ADMIN} />}
 
       {/* In-app confirmation dialog */}
       {ConfirmDialog}
