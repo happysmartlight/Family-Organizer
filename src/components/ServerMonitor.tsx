@@ -7,6 +7,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Cpu, Thermometer, MemoryStick, HardDrive, Server, Clock, AlertTriangle, Activity, Network, Globe, Copy, Check, Database, Smartphone, Users as UsersIcon, Wifi, ExternalLink, Plus, Pencil, Trash2, X, Save } from "lucide-react";
 import { ShimmerLine, Reveal, IconChip, Accent } from "./Lively.js";
 import { User, UserRole } from "../types.js";
+import { ImmichUpdateCard } from "./ImmichUpdateCard.js";
 import { useTranslation } from "react-i18next";
 
 // Client chỉ tải dữ liệu 1 phút/lần (server cũng tự ghi telemetry 1 phút/lần
@@ -717,6 +718,9 @@ export function ServerMonitor({ authHeaders, currentUser }: ServerMonitorProps) 
           )}
         </Reveal>
       )}
+
+      {/* ─── Cập nhật Immich (admin; ẩn nếu stack không có Immich) ─── */}
+      {isAdmin && <ImmichUpdateCard authHeaders={authHeaders} delay={0.28} />}
 
       {/* Chọn khoảng xem lịch sử */}
       <Reveal delay={0.2} className="flex items-center justify-between gap-2 flex-wrap">

@@ -21,7 +21,7 @@ import { telegramBackupStatus, sendBackupToTelegram, runTelegramBackupTick } fro
 import { sendWeeklyDigest, runWeeklyDigestTick } from "./server/weeklyDigest.js";
 import { icsFeedToken, isValidIcsToken, buildIcsFeed } from "./server/icsFeed.js";
 import { getVapidPublicKey, isPushConfigured, sendTestPush } from "./server/push.js";
-import { BUILD, checkReleases, getUpdateOverview, requestRestart, runUpdateTick, setAutoUpdate, startUpdate, updateAvailable, compareVersions } from "./server/updater.js";
+import { BUILD, checkReleases, getUpdateOverview, requestRestart, runUpdateTick, setAutoUpdate, startUpdate, updateAvailable, compareVersions, checkImmichRelease, getImmichOverview, startImmichUpdate } from "./server/updater.js";
 
 // Accepted permission roles for write validation
 const VALID_ROLES = new Set<string>([UserRole.ADMIN, UserRole.MEMBER, UserRole.CHILD, UserRole.GUEST]);
@@ -424,6 +424,32 @@ app.post("/api/system/restart", requireAuth, requireRole([UserRole.ADMIN]), (req
     res.json({ requestId });
   } catch (err: any) {
     res.status(400).json({ error: err.message || "Không gửi được yêu cầu khởi động lại." });
+  }
+});
+
+// Immich chạy chung stack: xem bản đang chạy / bản mới trên GitHub, cập nhật khi admin bấm
+// (updater chạy docker compose pull + up -d cho các service Immich).
+app.get("/api/system/immich", requireAuth, requireRole([UserRole.ADMIN]), async (_req: AuthRequest, res: Response) => {
+  res.json(await getImmichOverview());
+});
+
+app.post("/api/system/immich/check", requireAuth, requireRole([UserRole.ADMIN]), async (_req: AuthRequest, res: Response) => {
+  try {
+    await checkImmichRelease();
+    res.json(await getImmichOverview());
+  } catch (err: any) {
+    res.status(502).json({ error: err.message || "Không kiểm tra được bản Immich mới." });
+  }
+});
+
+app.post("/api/system/immich/update", requireAuth, requireRole([UserRole.ADMIN]), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await startImmichUpdate();
+    const s = req.userSession!;
+    FamilyDB.logActivity(s.userId, s.username, "Cập nhật Immich", `Kéo bản Immich mới và khởi động lại${result.from ? ` (đang chạy v${result.from})` : ""}.`);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || "Không bắt đầu cập nhật Immich được." });
   }
 });
 

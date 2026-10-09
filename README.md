@@ -151,6 +151,7 @@ Giao diện Neumorphism, hỗ trợ Light / Dark mode với hiệu ứng chuyể
 - Theo dõi CPU, RAM, nhiệt độ, ổ đĩa theo thời gian thực
 - Lịch sử 7 ngày dạng sparkline
 - Shortcut link tới các dịch vụ homelab (Immich, Portainer, v.v.)
+- **Cập nhật Immich** (khi chạy chung stack liu-homelab): so bản đang chạy với bản mới nhất trên GitHub, cảnh báo nếu có breaking changes, bấm để `docker compose pull` + `up -d` immich-server/immich-machine-learning
 - Phiên bản & Cập nhật nằm ở **Thiết lập → Hệ thống & Sao lưu** (xem mục [Cập nhật](#cập-nhật))
 
 ### 🤖 Trợ Lý AI (Gemini)

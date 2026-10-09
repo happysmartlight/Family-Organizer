@@ -117,6 +117,14 @@ interface UpdateSettings {
   lastAutoUpdateDate?: string;
   /** Lần cập nhật gần nhất app đã yêu cầu — để báo kết quả qua Telegram khi xong. */
   lastRequest?: { id: string; from: string; target: string; reason: UpdateReason; at: number; announced?: boolean };
+  /** Immich chạy chung stack — chỉ kiểm tra bản mới + cập nhật khi admin bấm. */
+  immich?: {
+    latest?: ImmichRelease;
+    lastCheckAt?: number;
+    lastCheckError?: string;
+    notifiedVersion?: string;
+    lastRequest?: { id: string; from: string | null; at: number; announced?: boolean };
+  };
 }
 
 const DEFAULT_SETTINGS: UpdateSettings = { autoUpdate: false, autoUpdateHour: 3 };
@@ -169,6 +177,10 @@ export interface UpdaterState {
   previous: string | null;
   finishedAt: number | null;
   scriptVersion: string | null;
+  /** Hành động của lượt gần nhất: update | restart | immich. */
+  action: string | null;
+  /** Service Immich updater được phép cập nhật (rỗng = stack không có Immich / updater cũ). */
+  immichServices: string[];
 }
 
 const IDLE_PHASES = ["idle", "done", "failed", "rolled_back", "unknown"];
@@ -191,7 +203,9 @@ export function readUpdaterState(): UpdaterState {
     current: kv.current || null,
     previous: kv.previous || null,
     finishedAt: kv.finished_at ? Number(kv.finished_at) * 1000 : null,
-    scriptVersion: kv.script_version || null
+    scriptVersion: kv.script_version || null,
+    action: kv.action || null,
+    immichServices: (kv.immich || "").split(" ").filter(Boolean)
   };
 }
 
@@ -218,7 +232,7 @@ function updaterBusy(state: UpdaterState): boolean {
 const SAFE = /^[A-Za-z0-9._\-/]+$/;
 
 interface UpdaterRequest {
-  action: "update" | "restart";
+  action: "update" | "restart" | "immich";
   target?: string;
   /** Bản chụp DB trước cập nhật — updater khôi phục nếu bản mới khởi động lỗi. */
   backup?: string;
@@ -465,37 +479,203 @@ export async function runUpdateTick(now = new Date()): Promise<void> {
   ticking = true;
   try {
     announceLastResult();
-
-    const s = getSettings();
-    if (!s.lastCheckAt || now.getTime() - s.lastCheckAt >= CHECK_EVERY_MS) {
-      await checkReleases();
-    }
-
-    const avail = updateAvailable();
-    if (!avail) return;
-    const cfg = getSettings();
-    if (cfg.notifiedVersion !== avail.version) {
-      saveSettings(c => {
-        c.notifiedVersion = avail.version;
-      });
-      const when = cfg.autoUpdate ? `App sẽ tự cập nhật lúc ${cfg.autoUpdateHour}:00.` : "Vào Thiết lập → Hệ thống & Sao lưu → Phiên bản & Cập nhật để xem thay đổi và cài.";
-      void notify(`✨ Family Organizer có bản mới v${avail.version} (đang chạy v${BUILD.version}).\n${when}`);
-    }
-
-    const today = localDateKey(now);
-    if (cfg.autoUpdate && now.getHours() === cfg.autoUpdateHour && cfg.lastAutoUpdateDate !== today && readUpdaterState().alive) {
-      saveSettings(c => {
-        c.lastAutoUpdateDate = today;
-      });
-      try {
-        await startUpdate(avail.version, { reason: "auto" });
-      } catch (e: any) {
-        void notify(`⏸ Không tự cập nhật được v${avail.version} đêm nay: ${e?.message || "lỗi không rõ"}`);
-      }
-    }
+    await announceImmichResult();
+    await appTick(now);
+    await immichTick(now);
   } catch (e: any) {
     console.error("Lỗi vòng kiểm tra cập nhật:", e?.message || e);
   } finally {
     ticking = false;
   }
+}
+
+async function appTick(now: Date): Promise<void> {
+  const s = getSettings();
+  if (!s.lastCheckAt || now.getTime() - s.lastCheckAt >= CHECK_EVERY_MS) {
+    await checkReleases().catch(() => {});
+  }
+
+  const avail = updateAvailable();
+  if (!avail) return;
+  const cfg = getSettings();
+  if (cfg.notifiedVersion !== avail.version) {
+    saveSettings(c => {
+      c.notifiedVersion = avail.version;
+    });
+    const when = cfg.autoUpdate ? `App sẽ tự cập nhật lúc ${cfg.autoUpdateHour}:00.` : "Vào Thiết lập → Hệ thống & Sao lưu → Phiên bản & Cập nhật để xem thay đổi và cài.";
+    void notify(`✨ Family Organizer có bản mới v${avail.version} (đang chạy v${BUILD.version}).\n${when}`);
+  }
+
+  const today = localDateKey(now);
+  if (cfg.autoUpdate && now.getHours() === cfg.autoUpdateHour && cfg.lastAutoUpdateDate !== today && readUpdaterState().alive) {
+    saveSettings(c => {
+      c.lastAutoUpdateDate = today;
+    });
+    try {
+      await startUpdate(avail.version, { reason: "auto" });
+    } catch (e: any) {
+      void notify(`⏸ Không tự cập nhật được v${avail.version} đêm nay: ${e?.message || "lỗi không rõ"}`);
+    }
+  }
+}
+
+// --- Immich (chạy chung stack liu-homelab) ------------------------------------
+// Updater tự dò service Immich có trong compose (state.env: immich=...) và chỉ chạy
+// `docker compose pull` + `up -d` cho đúng các service đó. App chỉ gửi action=immich.
+// KHÔNG tự cập nhật Immich: bản lớn hay có breaking changes, admin đọc ghi chú rồi bấm.
+
+const IMMICH_URL = (process.env.IMMICH_URL || "http://immich-server:2283").replace(/\/+$/, "");
+const IMMICH_REPO = "immich-app/immich";
+
+export interface ImmichRelease {
+  version: string;
+  name: string;
+  url: string;
+  publishedAt: string;
+  /** Ghi chú phát hành nhắc tới breaking changes → cảnh báo admin đọc kỹ. */
+  breaking: boolean;
+}
+
+export type ImmichStatus = "ready" | "updater_down" | "updater_old" | "no_immich";
+
+function immichStatus(st: UpdaterState): ImmichStatus {
+  if (!st.alive) return "updater_down";
+  if (Number(st.scriptVersion || 0) < 2) return "updater_old";
+  return st.immichServices.length ? "ready" : "no_immich";
+}
+
+/** Phiên bản Immich đang chạy — endpoint công khai, gọi thẳng trong mạng docker của stack. */
+async function immichRunningVersion(): Promise<{ version: string | null; error: string | null }> {
+  try {
+    const res = await fetch(`${IMMICH_URL}/api/server/version`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const v = (await res.json()) as { major: number; minor: number; patch: number };
+    return { version: `${v.major}.${v.minor}.${v.patch}`, error: null };
+  } catch (e: any) {
+    return {
+      version: null,
+      error: e?.name === "TimeoutError" ? "Immich không phản hồi" : `Không đọc được phiên bản Immich (${e?.message || "lỗi"})`
+    };
+  }
+}
+
+export async function checkImmichRelease(): Promise<ImmichRelease> {
+  try {
+    const headers: Record<string, string> = { Accept: "application/vnd.github+json", "User-Agent": "family-organizer" };
+    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+    const res = await fetch(`https://api.github.com/repos/${IMMICH_REPO}/releases/latest`, {
+      headers,
+      signal: AbortSignal.timeout(15_000)
+    });
+    if (!res.ok) throw new Error(`GitHub trả lỗi HTTP ${res.status}`);
+    const r = (await res.json()) as { tag_name: string; name: string; html_url: string; published_at: string; body: string };
+    const latest: ImmichRelease = {
+      version: String(r.tag_name || "").replace(/^v/, ""),
+      name: r.name || r.tag_name,
+      url: r.html_url,
+      publishedAt: r.published_at,
+      breaking: /breaking[\s-]*change/i.test(r.body || "")
+    };
+    saveSettings(s => {
+      s.immich = { ...s.immich, latest, lastCheckAt: Date.now(), lastCheckError: undefined };
+    });
+    return latest;
+  } catch (err: any) {
+    const message =
+      err?.name === "TimeoutError" ? "GitHub không phản hồi (hết thời gian chờ)" : err?.message || "Không kiểm tra được bản Immich mới";
+    saveSettings(s => {
+      s.immich = { ...s.immich, lastCheckAt: Date.now(), lastCheckError: message };
+    });
+    throw new Error(message);
+  }
+}
+
+export async function getImmichOverview() {
+  const st = readUpdaterState();
+  const im = getSettings().immich ?? {};
+  const running = await immichRunningVersion();
+  const latest = im.latest ?? null;
+  return {
+    status: immichStatus(st),
+    services: st.immichServices,
+    running,
+    latest,
+    updateAvailable: !!(latest && running.version && compareVersions(latest.version, running.version) > 0),
+    lastCheckAt: im.lastCheckAt ?? null,
+    lastCheckError: im.lastCheckError ?? null,
+    busy: updaterBusy(st),
+    updater: {
+      phase: st.phase,
+      requestId: st.requestId,
+      action: st.action,
+      result: st.result,
+      message: st.message,
+      finishedAt: st.finishedAt
+    },
+    lastRequest: im.lastRequest ?? null,
+    log: st.action === "immich" ? readUpdaterLog() : ""
+  };
+}
+
+export async function startImmichUpdate(): Promise<{ requestId: string; from: string | null }> {
+  const status = immichStatus(readUpdaterState());
+  if (status === "updater_down") throw new Error("Dịch vụ cập nhật (family-organizer-updater) không chạy.");
+  if (status === "updater_old") {
+    throw new Error(
+      "Dịch vụ cập nhật đang là bản cũ, chưa biết cập nhật Immich. Cập nhật Family Organizer một lần (hoặc chạy lại setup.sh) để nâng cấp."
+    );
+  }
+  if (status === "no_immich") throw new Error("Stack này không có Immich.");
+  const { version: from } = await immichRunningVersion();
+  const id = writeUpdaterRequest({ action: "immich" });
+  saveSettings(s => {
+    s.immich = { ...s.immich, lastRequest: { id, from, at: Date.now() } };
+  });
+  void notify(`🔄 Đang cập nhật Immich${from ? ` (đang chạy v${from})` : ""}: kéo bản mới rồi khởi động lại.`);
+  return { requestId: id, from };
+}
+
+async function announceImmichResult(): Promise<void> {
+  const r = getSettings().immich?.lastRequest;
+  if (!r || r.announced) return;
+  const markAnnounced = () =>
+    saveSettings(s => {
+      if (s.immich?.lastRequest) s.immich.lastRequest.announced = true;
+    });
+  const st = readUpdaterState();
+  if (st.requestId !== r.id || !st.finishedAt || !st.result) {
+    if (Date.now() - r.at > 60 * 60 * 1000) markAnnounced();
+    return;
+  }
+  markAnnounced();
+  if (st.result !== "ok") {
+    void notify(`❌ Cập nhật Immich thất bại: ${st.message || "lỗi không rõ"}`);
+    return;
+  }
+  const { version } = await immichRunningVersion();
+  const same = !!version && version === r.from;
+  void notify(
+    `✅ Immich đã cập nhật${version ? ` — đang chạy v${version}` : ""}.` +
+      (same ? " (Vẫn là bản cũ: image Immich có thể chưa ra bản mới, hoặc IMMICH_VERSION trong .env đang ghim bản cố định.)" : "")
+  );
+}
+
+async function immichTick(now: Date): Promise<void> {
+  if (immichStatus(readUpdaterState()) !== "ready") return;
+  const im = getSettings().immich ?? {};
+  if (!im.lastCheckAt || now.getTime() - im.lastCheckAt >= CHECK_EVERY_MS) {
+    await checkImmichRelease().catch(() => {});
+  }
+  const latest = getSettings().immich?.latest;
+  if (!latest || getSettings().immich?.notifiedVersion === latest.version) return;
+  const { version } = await immichRunningVersion();
+  if (!version || compareVersions(latest.version, version) <= 0) return;
+  saveSettings(s => {
+    s.immich = { ...s.immich, notifiedVersion: latest.version };
+  });
+  void notify(
+    `📸 Immich có bản mới v${latest.version} (đang chạy v${version}).` +
+      (latest.breaking ? "\n⚠️ Ghi chú phát hành có BREAKING CHANGES — đọc kỹ trước khi cập nhật." : "") +
+      `\nĐọc ghi chú: ${latest.url}\nCập nhật trong Family Organizer → Quản lý Server.`
+  );
 }

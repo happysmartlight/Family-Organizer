@@ -5,7 +5,7 @@
 # App không tự thay được chính nó, nên việc kéo image mới + khởi động lại
 # giao cho container này. Nó KHÔNG mở cổng mạng: chỉ đọc/ghi file trong
 # <thư mục data của app>/update/ (thư mục chung với app):
-#   request.env   app → updater   id, action (update|restart), target, backup, restore, script
+#   request.env   app → updater   id, action (update|restart|immich), target, backup, restore, script
 #   state.env     updater → app   heartbeat, phase, result, message, current, previous…
 #   log.txt       nhật ký lần chạy gần nhất
 #
@@ -13,6 +13,8 @@
 # app báo đúng phiên bản. Hỏng → tự quay về bản cũ + khôi phục DB sao lưu
 # trước đó. Chỉ đụng tới service app: chạy được trong stack dùng chung
 # (vd liu-homelab có cả Immich, Home Assistant…) mà không ảnh hưởng service khác.
+# Hành động "immich": pull + up -d các service Immich trong cùng stack (danh sách
+# cố định qua IMMICH_SERVICES, app không chọn được service nào khác).
 # Viết sh thuần (busybox), không cần jq/curl.
 #
 # Biến môi trường:
@@ -21,10 +23,12 @@
 #   APP_DATA     thư mục data của app trên host (mặc định $STACK_DIR/data)
 #   SERVICE      tên service app trong compose (mặc định family-organizer)
 #   VERSION_VAR  biến trong .env chọn tag image (mặc định FAMILY_ORGANIZER_VERSION)
+#   IMMICH_SERVICES  service Immich được phép cập nhật (mặc định immich-server
+#                immich-machine-learning; chỉ bật nếu stack thật sự có; đặt rỗng để tắt)
 # ═══════════════════════════════════════════════════════════════════
 set -u
 
-SCRIPT_VERSION=1
+SCRIPT_VERSION=2
 SELF="$0"
 STACK="${STACK_DIR:?Thiếu STACK_DIR}"
 DATA="${APP_DATA:-$STACK/data}"
@@ -40,6 +44,10 @@ APP_PORT="${APP_PORT:-3000}"
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-240}"
+IMMICH_SERVICES="${IMMICH_SERVICES-immich-server immich-machine-learning}"
+# Immich có thể chạy migration DB lâu sau khi lên bản mới.
+IMMICH_HEALTH_TIMEOUT="${IMMICH_HEALTH_TIMEOUT:-900}"
+IMMICH=""
 
 mkdir -p "$UPD"
 chown "$PUID:$PGID" "$UPD" 2>/dev/null || true
@@ -50,8 +58,10 @@ MESSAGE=""
 REQ_ID=""
 PREVIOUS=""
 FINISHED=""
+LAST_ACTION=""
 if [ -f "$STATE" ]; then
   REQ_ID="$(sed -n 's/^request_id=//p' "$STATE")"
+  LAST_ACTION="$(sed -n 's/^action=//p' "$STATE")"
   RESULT="$(sed -n 's/^result=//p' "$STATE")"
   MESSAGE="$(sed -n 's/^message=//p' "$STATE")"
   PREVIOUS="$(sed -n 's/^previous=//p' "$STATE")"
@@ -81,12 +91,14 @@ write_state() {
     echo "heartbeat=$(date +%s)"
     echo "phase=$PHASE"
     echo "request_id=$REQ_ID"
+    echo "action=$LAST_ACTION"
     echo "result=$RESULT"
     echo "message=$(printf '%s' "$MESSAGE" | tr '\n' ' ')"
     echo "current=$(env_get "$VERSION_VAR")"
     echo "previous=$PREVIOUS"
     echo "finished_at=$FINISHED"
     echo "script_version=$SCRIPT_VERSION"
+    echo "immich=$IMMICH"
   } >"$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$STATE"
 }
 
@@ -160,6 +172,39 @@ prune_images() {
   docker images -q -f dangling=true "$repo" 2>/dev/null | xargs -r docker rmi >/dev/null 2>&1 || true
 }
 
+# Service Immich nào trong IMMICH_SERVICES thật sự có trong compose → được phép cập nhật.
+detect_immich() {
+  IMMICH=""
+  [ -n "$IMMICH_SERVICES" ] || return 0
+  all="$(dc config --services 2>/dev/null)" || return 0
+  for s in $IMMICH_SERVICES; do
+    printf '%s\n' "$all" | grep -qx "$s" && IMMICH="$IMMICH${IMMICH:+ }$s"
+  done
+  return 0
+}
+
+# Chờ mọi service Immich chạy ổn: healthy (nếu image có healthcheck) hoặc running.
+immich_wait() {
+  deadline=$(($(date +%s) + IMMICH_HEALTH_TIMEOUT))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    ready=1
+    for s in $IMMICH; do
+      cid="$(dc ps -q "$s" 2>/dev/null | head -n 1)"
+      if [ -z "$cid" ]; then ready=0; continue; fi
+      st="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null)"
+      restarts="$(docker inspect -f '{{.RestartCount}}' "$cid" 2>/dev/null || echo 0)"
+      if [ "${restarts:-0}" -ge 3 ]; then
+        log "$s khởi động lỗi liên tục ($restarts lần)"
+        return 1
+      fi
+      case "$st" in healthy | running) ;; *) ready=0 ;; esac
+    done
+    [ "$ready" = 1 ] && return 0
+    sleep 5
+  done
+  return 1
+}
+
 finish() {
   hb_stop
   RESULT="$1"
@@ -170,6 +215,45 @@ finish() {
   log "=== $MESSAGE ==="
   PHASE=idle
   write_state
+}
+
+do_immich() {
+  : >"$LOG"
+  RESULT=""
+  MESSAGE=""
+  FINISHED=""
+  if [ -z "$IMMICH" ]; then
+    finish failed "Stack này không có Immich (IMMICH_SERVICES)" failed
+    return
+  fi
+  PHASE=pulling
+  write_state
+  hb_start
+  log "=== Cập nhật Immich ($IMMICH) ==="
+  log "--- docker compose pull $IMMICH ---"
+  # shellcheck disable=SC2086
+  if ! dc pull $IMMICH >>"$LOG" 2>&1; then
+    finish failed "Không tải được bản Immich mới (kiểm tra mạng / ghcr.io)" failed
+    return
+  fi
+  PHASE=restarting
+  write_state
+  log "--- docker compose up -d $IMMICH ---"
+  # shellcheck disable=SC2086
+  if ! dc up -d $IMMICH >>"$LOG" 2>&1; then
+    finish failed "Immich không khởi động được — xem nhật ký" failed
+    return
+  fi
+  PHASE=health
+  write_state
+  if immich_wait; then
+    log "--- dọn image cũ (dangling) ---"
+    docker image prune -f >>"$LOG" 2>&1 || true
+    finish ok "Đã cập nhật Immich" done
+  else
+    for s in $IMMICH; do dc logs --tail 30 "$s" >>"$LOG" 2>&1; done
+    finish failed "Immich chưa chạy ổn sau khi cập nhật — xem nhật ký" failed
+  fi
 }
 
 do_restart() {
@@ -273,6 +357,7 @@ if ! docker compose version >/dev/null 2>&1; then
   apk add --no-cache docker-cli-compose >/dev/null 2>&1 || echo "updater: không cài được docker compose"
 fi
 [ -f "$STACK/docker-compose.yml" ] || echo "updater: CẢNH BÁO — không thấy $STACK/docker-compose.yml (STACK_DIR sai?)"
+detect_immich
 # Mất điện giữa chừng: yêu cầu đang làm dở coi như thất bại, không chạy lại.
 if [ -f "$WORK" ]; then
   REQ_ID="$(req_get id)"
@@ -282,7 +367,7 @@ if [ -f "$WORK" ]; then
   FINISHED="$(date +%s)"
 fi
 write_state
-echo "updater: sẵn sàng (v$SCRIPT_VERSION), stack $STACK, data $DATA, service $SERVICE"
+echo "updater: sẵn sàng (v$SCRIPT_VERSION), stack $STACK, data $DATA, service $SERVICE${IMMICH:+, immich: $IMMICH}"
 
 last=0
 while :; do
@@ -290,9 +375,11 @@ while :; do
     mv -f "$REQ" "$WORK"
     REQ_ID="$(req_get id)"
     action="$(req_get action)"
+    LAST_ACTION="$action"
     case "$action" in
       update) do_update ;;
       restart) do_restart ;;
+      immich) do_immich ;;
       *) log "Bỏ qua yêu cầu lạ: $action" ;;
     esac
     rm -f "$WORK"

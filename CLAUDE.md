@@ -22,7 +22,9 @@ và máy đang chạy không nhận code mới. Muốn người dùng có bản 
 Cơ chế cập nhật: [server/updater.ts](server/updater.ts) (app, giao tiếp qua file trong
 `data/update/`) + [deploy/updater.sh](deploy/updater.sh) (container `family-organizer-updater`,
 sh thuần/busybox — CI chạy `sh -n`). Trên Pi app nằm trong stack **liu-homelab** (dùng chung
-với Immich…), nên updater chỉ được đụng service `family-organizer`, không thay compose.
+với Immich…), nên updater chỉ được đụng service `family-organizer` (và, với hành động
+`immich` do admin bấm ở Quản lý Server, các service trong `IMMICH_SERVICES` mà nó tự dò
+thấy trong compose) — không thay compose. App chỉ gửi tên hành động, không gửi lệnh/service.
 Đổi `updater.sh` thì máy đang chạy tự nhận bản mới ở lần cập nhật kế tiếp (tải từ tag).
 Dữ liệu mới nên thêm theo kiểu không phá bản cũ — người dùng có thể "Quay về" bản trước
 trên cùng database.

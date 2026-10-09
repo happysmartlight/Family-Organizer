@@ -189,6 +189,37 @@ function Changelog({ text }: { text: string }) {
 
 // --- Tiến trình cập nhật -----------------------------------------------------
 
+/** Thanh các bước (dùng chung với thẻ cập nhật Immich ở Quản lý Server). */
+export function StepDots({ steps, current, done, ariaLabel = "Các bước cập nhật" }: { steps: string[]; current: number; done: boolean; ariaLabel?: string }) {
+  return (
+    <ol className="grid gap-1" style={{ gridTemplateColumns: `repeat(${steps.length}, minmax(0, 1fr))` }} aria-label={ariaLabel}>
+      {steps.map((label, i) => {
+        const state = done || i < current ? "done" : i === current ? "current" : "todo";
+        return (
+          <li key={label} className="flex flex-col items-center gap-1 text-center min-w-0">
+            <div className="flex items-center w-full">
+              <span className={`h-0.5 flex-1 rounded-full ${i === 0 ? "opacity-0" : state === "todo" ? "bg-slate-800" : "bg-emerald-500/60"}`} />
+              <span
+                className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-[10px] font-bold ${
+                  state === "done"
+                    ? "bg-emerald-500 text-white"
+                    : state === "current"
+                      ? "bg-sky-500/15 text-sky-400 ring-2 ring-sky-500/40"
+                      : "bg-slate-800 text-slate-500"
+                }`}
+              >
+                {state === "done" ? <Check className="w-3.5 h-3.5" /> : state === "current" ? <RefreshCw className="w-3 h-3 animate-spin" /> : i + 1}
+              </span>
+              <span className={`h-0.5 flex-1 rounded-full ${i === steps.length - 1 ? "opacity-0" : state === "done" ? "bg-emerald-500/60" : "bg-slate-800"}`} />
+            </div>
+            <span className={`text-[10px] leading-tight ${state === "current" ? "text-slate-200 font-bold" : "text-slate-500"}`}>{label}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 function ProgressCard({ progress, onClose }: { progress: Progress; onClose: () => void }) {
   const [, tick] = useState(0);
   useEffect(() => {
@@ -247,31 +278,7 @@ function ProgressCard({ progress, onClose }: { progress: Progress; onClose: () =
       </div>
 
       {!failed && (
-        <ol className="grid grid-cols-5 gap-1" aria-label="Các bước cập nhật">
-          {STEPS.map((label, i) => {
-            const state = done || i < progress.step ? "done" : i === progress.step ? "current" : "todo";
-            return (
-              <li key={label} className="flex flex-col items-center gap-1 text-center min-w-0">
-                <div className="flex items-center w-full">
-                  <span className={`h-0.5 flex-1 rounded-full ${i === 0 ? "opacity-0" : state === "todo" ? "bg-slate-800" : "bg-emerald-500/60"}`} />
-                  <span
-                    className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-[10px] font-bold ${
-                      state === "done"
-                        ? "bg-emerald-500 text-white"
-                        : state === "current"
-                          ? "bg-sky-500/15 text-sky-400 ring-2 ring-sky-500/40"
-                          : "bg-slate-800 text-slate-500"
-                    }`}
-                  >
-                    {state === "done" ? <Check className="w-3.5 h-3.5" /> : state === "current" ? <RefreshCw className="w-3 h-3 animate-spin" /> : i + 1}
-                  </span>
-                  <span className={`h-0.5 flex-1 rounded-full ${i === STEPS.length - 1 ? "opacity-0" : state === "done" ? "bg-emerald-500/60" : "bg-slate-800"}`} />
-                </div>
-                <span className={`text-[10px] leading-tight ${state === "current" ? "text-slate-200 font-bold" : "text-slate-500"}`}>{label}</span>
-              </li>
-            );
-          })}
-        </ol>
+        <StepDots steps={STEPS} current={progress.step} done={done} />
       )}
 
       {progress.status === "running" && (

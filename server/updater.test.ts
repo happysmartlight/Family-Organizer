@@ -116,4 +116,36 @@ describe("hộp thư với dịch vụ cập nhật", () => {
     // Đang có yêu cầu chờ → không chạy lượt thứ hai.
     await expect(m.startUpdate("99.0.1", { reason: "manual" })).rejects.toThrow(/chạy dở/);
   });
+
+  it("Immich: chỉ bật khi updater ≥ v2 báo có service Immich; so bản đang chạy với bản mới nhất", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        String(url).endsWith("/api/server/version") ? Response.json({ major: 1, minor: 130, patch: 2 }) : new Response("nf", { status: 404 })
+      )
+    );
+    fs.mkdirSync(upd, { recursive: true });
+    fs.writeFileSync(
+      path.join(upd, "settings.json"),
+      JSON.stringify({ immich: { latest: { version: "1.131.0", name: "v1.131.0", url: "u", publishedAt: "2026-10-01T00:00:00Z", breaking: true } } })
+    );
+    const m = await load();
+    expect((await m.getImmichOverview()).status).toBe("updater_down");
+    writeState({ heartbeat: now(), phase: "idle", script_version: 1 });
+    expect((await m.getImmichOverview()).status).toBe("updater_old");
+    writeState({ heartbeat: now(), phase: "idle", script_version: 2, immich: "" });
+    expect((await m.getImmichOverview()).status).toBe("no_immich");
+    await expect(m.startImmichUpdate()).rejects.toThrow(/không có Immich/);
+
+    writeState({ heartbeat: now(), phase: "idle", script_version: 2, immich: "immich-server immich-machine-learning" });
+    const ov = await m.getImmichOverview();
+    expect(ov).toMatchObject({ status: "ready", services: ["immich-server", "immich-machine-learning"], updateAvailable: true });
+    expect(ov.running.version).toBe("1.130.2");
+
+    const r = await m.startImmichUpdate();
+    expect(r.from).toBe("1.130.2");
+    // Yêu cầu chỉ có action — danh sách service do updater quyết định, app không gửi.
+    expect(parseEnv(fs.readFileSync(path.join(upd, "request.env"), "utf8"))).toEqual({ id: r.requestId, action: "immich" });
+    await expect(m.startImmichUpdate()).rejects.toThrow(/chạy dở/);
+  });
 });
