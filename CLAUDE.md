@@ -26,5 +26,15 @@ với Immich…), nên updater chỉ được đụng service `family-organizer`
 `immich` do admin bấm ở Quản lý Server, các service trong `IMMICH_SERVICES` mà nó tự dò
 thấy trong compose) — không thay compose. App chỉ gửi tên hành động, không gửi lệnh/service.
 Đổi `updater.sh` thì máy đang chạy tự nhận bản mới ở lần cập nhật kế tiếp (tải từ tag).
+
+**Ứng dụng trong nhà** (Car Rental, KidTube — stack riêng cạnh liu-homelab): FO là trung tâm
+điều khiển. Cập nhật = gọi API cập nhật sẵn có của chính app đó bằng khóa chung `HUB_TOKEN`
+([server/apps.ts](server/apps.ts); app nào không đặt `*_URL` thì ẩn) — đừng tự làm luồng cập
+nhật thay app. Khởi động lại = action `app_restart` + tên app; updater chỉ nhận tên có trong
+`MANAGED_APPS` (`tên:thư-mục:service`) rồi tự tra service. Updater còn trông chừng container
+(stack này + `MANAGED_APPS`) mỗi `WATCH_EVERY` giây → `containers.txt`, và chỉ tự dựng lại
+(compose `up -d --no-deps --force-recreate`) khi chạy mà mất mạng/mất cổng hoặc khởi động lỗi,
+thấy 2 vòng liền, có giới hạn, bỏ qua stack đang tự cập nhật và chính nó. Không dùng
+`docker start` để sửa: Docker 29 cho container chạy mà không có mạng/cổng.
 Dữ liệu mới nên thêm theo kiểu không phá bản cũ — người dùng có thể "Quay về" bản trước
 trên cùng database.

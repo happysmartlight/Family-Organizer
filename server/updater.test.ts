@@ -148,4 +148,134 @@ describe("hộp thư với dịch vụ cập nhật", () => {
     expect(parseEnv(fs.readFileSync(path.join(upd, "request.env"), "utf8"))).toEqual({ id: r.requestId, action: "immich" });
     await expect(m.startImmichUpdate()).rejects.toThrow(/chạy dở/);
   });
+
+  it("trông chừng: đọc containers.txt + heal.log (mới nhất trước); quá 3 chu kỳ không ghi → số liệu cũ", async () => {
+    writeState({ heartbeat: now(), phase: "idle", script_version: 3, watch_every: 60 });
+    fs.writeFileSync(
+      path.join(upd, "containers.txt"),
+      `checked_at=${now()}\nc filebrowser homelab filebrowser running healthy ok\nc kidtube kidtube kidtube running - no_ports\nrác\n`
+    );
+    fs.writeFileSync(path.join(upd, "heal.log"), `${now() - 600} portainer no_network ok\n${now() - 60} kidtube no_ports failed\n`);
+    const m = await load();
+    const w = m.readContainers();
+    expect(w.stale).toBe(false);
+    expect(w.containers).toEqual([
+      { name: "filebrowser", project: "homelab", service: "filebrowser", status: "running", health: "healthy", problem: "ok" },
+      { name: "kidtube", project: "kidtube", service: "kidtube", status: "running", health: null, problem: "no_ports" }
+    ]);
+    expect(m.readHealEvents().map(e => [e.container, e.ok])).toEqual([["kidtube", false], ["portainer", true]]);
+    fs.writeFileSync(path.join(upd, "containers.txt"), `checked_at=${now() - 600}\n`);
+    expect(m.readContainers().stale).toBe(true);
+  });
+
+  it("báo Telegram lần tự sửa mới; lần đầu không báo dồn lịch sử; sửa hỏng chỉ báo 1 lần", async () => {
+    const sent: string[] = [];
+    vi.doMock("./telegramBackup.js", () => ({ notifyTelegram: async (t: string) => void sent.push(t) }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nf", { status: 404 })));
+    writeState({ heartbeat: now(), phase: "idle", script_version: 3 });
+    const heal = (line: string) => fs.appendFileSync(path.join(upd, "heal.log"), `${line}\n`);
+    const m = await load();
+    // Chưa có heal.log vẫn phải đặt mốc — nếu không, lần tự sửa thật đầu tiên bị coi là lịch sử.
+    await m.runUpdateTick();
+    heal(`${now() - 3600} portainer no_network ok`);
+    await m.runUpdateTick();
+    await new Promise(r => setTimeout(r, 20));
+    expect(sent).toEqual([]);
+    heal(`${now() + 1} filebrowser no_ports ok`);
+    heal(`${now() + 2} kidtube start_failed failed`);
+    await m.runUpdateTick();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatch(/filebrowser bị mất cổng — đã tự dựng lại/);
+    expect(sent[0]).toMatch(/kidtube bị không khởi động được, tự dựng lại không được/);
+    heal(`${now() + 3} kidtube start_failed failed`);
+    await m.runUpdateTick();
+    await new Promise(r => setTimeout(r, 20));
+    expect(sent).toHaveLength(1);
+    vi.doUnmock("./telegramBackup.js");
+  });
+
+  it("khởi động lại app: chỉ app trong MANAGED_APPS của updater ≥ v3; yêu cầu chỉ gửi tên app", async () => {
+    const m = await load();
+    writeState({ heartbeat: now(), phase: "idle", script_version: 2 });
+    expect(() => m.requestAppRestart("kidtube")).toThrow(/bản cũ/);
+    writeState({ heartbeat: now(), phase: "idle", script_version: 3, apps: "car-rental kidtube" });
+    expect(() => m.requestAppRestart("immich-server")).toThrow(/không quản lý/);
+    expect(() => m.requestAppRestart("kid tube")).toThrow();
+    const id = m.requestAppRestart("kidtube");
+    expect(parseEnv(fs.readFileSync(path.join(upd, "request.env"), "utf8"))).toEqual({ id, action: "app_restart", app: "kidtube" });
+  });
+
+  it("app ở stack riêng: gọi API của app bằng HUB_TOKEN; chưa nhận khóa → báo cần cập nhật app; cài đúng bản admin chọn", async () => {
+    vi.stubEnv("HUB_TOKEN", "t".repeat(64));
+    vi.stubEnv("CAR_RENTAL_URL", "http://lan:3002/");
+    vi.stubEnv("KIDTUBE_URL", "http://lan:8477");
+    const calls: { url: string; method: string; auth: string | null; body: string | null }[] = [];
+    let kidAuthOk = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit = {}) => {
+        const headers = (init.headers || {}) as Record<string, string>;
+        calls.push({ url: String(url), method: init.method || "GET", auth: headers.Authorization ?? null, body: (init.body as string) ?? null });
+        const u = new URL(String(url));
+        if (u.pathname === "/api/health") return Response.json({ ok: true, version: u.port === "3002" ? "0.4.4" : "0.1.0" });
+        if (u.port === "8477" && !kidAuthOk) return Response.json({ error: "Cần nhập PIN" }, { status: 401 });
+        if (u.pathname === "/api/system/update")
+          return Response.json({
+            current: { version: "0.4.4" },
+            updater: { alive: true, phase: "idle", result: "ok", message: "Đã lên v0.4.4", finishedAt: 1 },
+            pending: null,
+            log: "",
+            available: { version: "0.4.5", name: "v0.4.5", notes: "- Sửa lỗi", url: "https://x" },
+            lastCheckAt: 5,
+            lastCheckError: null
+          });
+        if (u.pathname === "/api/admin/update")
+          return Response.json({
+            running: { version: "0.1.0", commitShort: "7565c22" },
+            updater: { installed: true, online: true, phase: "idle", pendingRequest: false, repoOk: true, repoError: null },
+            repo: { headShort: "7565c22", dirty: false, behind: 2, pending: [{ short: "a1", subject: "feat: x" }, { short: "b2", subject: "fix: y" }], checkedAt: "2026-10-31T00:00:00Z", fetchError: null },
+            deployedCommit: "7565c22aaaa",
+            lastRun: null,
+            log: null,
+            warnings: { activeKidSessions: 1, downloadRunning: false }
+          });
+        return Response.json({ ok: true });
+      })
+    );
+    writeState({ heartbeat: now(), phase: "idle", script_version: 3, apps: "car-rental kidtube" });
+    vi.resetModules();
+    const apps = await import("./apps.js");
+
+    const ov = await apps.getAppsOverview();
+    const car = ov.apps.find(a => a.id === "car-rental")!;
+    const kid = ov.apps.find(a => a.id === "kidtube")!;
+    expect(car).toMatchObject({ control: "ok", canRestart: true, health: { ok: true, version: "0.4.4" } });
+    expect(car.update).toMatchObject({ current: "0.4.4", available: { version: "0.4.5" }, busy: false, blockers: [] });
+    expect(kid).toMatchObject({ control: "unauthorized", update: null, health: { ok: true } });
+    expect(kid.controlError).toMatch(/HUB_TOKEN/);
+    // Health công khai: không gửi khóa ra ngoài khi không cần.
+    expect(calls.filter(c => c.url.endsWith("/api/health")).every(c => c.auth === null)).toBe(true);
+    expect(calls.find(c => c.url === "http://lan:3002/api/system/update")?.auth).toBe(`Bearer ${"t".repeat(64)}`);
+
+    kidAuthOk = true;
+    const kidUpd = (await apps.getAppsOverview()).apps.find(a => a.id === "kidtube")!.update!;
+    expect(kidUpd).toMatchObject({ current: "7565c22", available: { title: "2 thay đổi mới" } });
+    expect(kidUpd.available!.commits).toHaveLength(2);
+    expect(kidUpd.warnings[0]).toMatch(/1 bé đang xem/);
+
+    await expect(apps.startAppUpdate("car-rental", "0.4.5")).resolves.toEqual({ target: "0.4.5" });
+    const apply = calls.find(c => c.url.endsWith("/api/system/update/apply"))!;
+    expect(apply).toMatchObject({ method: "POST" });
+    expect(JSON.parse(apply.body!)).toEqual({ version: "0.4.5" });
+    await expect(apps.startAppUpdate("car-rental", "bad")).rejects.toThrow(/không có bản mới/);
+    await expect(apps.startAppUpdate("kidtube")).resolves.toEqual({ target: null });
+    // POST không body → không gắn content-type JSON (Fastify từ chối JSON rỗng).
+    const run = calls.find(c => c.url.endsWith("/api/admin/update/run"))!;
+    expect(run.body).toBeNull();
+    await expect(apps.startAppUpdate("immich")).rejects.toThrow(/Không có app/);
+
+    expect(apps.restartApp("kidtube")).toBeTruthy();
+    expect(parseEnv(fs.readFileSync(path.join(upd, "request.env"), "utf8"))).toMatchObject({ action: "app_restart", app: "kidtube" });
+    vi.unstubAllEnvs();
+  });
 });

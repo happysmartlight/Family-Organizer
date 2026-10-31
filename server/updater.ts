@@ -11,6 +11,8 @@
 //   request.env    app → updater   (id, action, target, backup, restore, script)
 //   state.env      updater → app   (heartbeat, phase, result, message, current…)
 //   log.txt        updater → app   (log lần chạy gần nhất)
+//   containers.txt updater → app   trạng thái container các stack được trông chừng
+//   heal.log       updater → app   các lần updater tự dựng lại container hỏng
 //   staged/<v>/    updater.sh của bản sắp cài (app tải từ tag trên GitHub)
 //   snapshots/     bản chụp family.db trước mỗi lần cập nhật (.db.gz) — updater
 //                  dùng để tự khôi phục nếu bản mới khởi động lỗi
@@ -32,6 +34,8 @@ const REQ_FILE = path.join(UPDATE_DIR, "request.env");
 const STATE_FILE = path.join(UPDATE_DIR, "state.env");
 const LOG_FILE = path.join(UPDATE_DIR, "log.txt");
 const SETTINGS_FILE = path.join(UPDATE_DIR, "settings.json");
+const CONTAINERS_FILE = path.join(UPDATE_DIR, "containers.txt");
+const HEAL_LOG_FILE = path.join(UPDATE_DIR, "heal.log");
 
 export const GITHUB_REPO = process.env.GITHUB_REPO || "happysmartlight/Family-Organizer";
 const MAX_SNAPSHOTS = 5;
@@ -125,6 +129,8 @@ interface UpdateSettings {
     notifiedVersion?: string;
     lastRequest?: { id: string; from: string | null; at: number; announced?: boolean };
   };
+  /** Đã báo Telegram các lần tự sửa container tới mốc này; sửa hỏng chỉ báo 1 lần / 6 giờ / container. */
+  watch?: { notifiedAt?: number; failNotified?: Record<string, number> };
 }
 
 const DEFAULT_SETTINGS: UpdateSettings = { autoUpdate: false, autoUpdateHour: 3 };
@@ -177,10 +183,14 @@ export interface UpdaterState {
   previous: string | null;
   finishedAt: number | null;
   scriptVersion: string | null;
-  /** Hành động của lượt gần nhất: update | restart | immich. */
+  /** Hành động của lượt gần nhất: update | restart | immich | app_restart. */
   action: string | null;
   /** Service Immich updater được phép cập nhật (rỗng = stack không có Immich / updater cũ). */
   immichServices: string[];
+  /** App ở stack riêng updater trông chừng + khởi động lại được (MANAGED_APPS; updater ≥ v3). */
+  apps: string[];
+  /** Chu kỳ trông chừng container (giây); 0/null = không trông chừng. */
+  watchEvery: number | null;
 }
 
 const IDLE_PHASES = ["idle", "done", "failed", "rolled_back", "unknown"];
@@ -205,7 +215,9 @@ export function readUpdaterState(): UpdaterState {
     finishedAt: kv.finished_at ? Number(kv.finished_at) * 1000 : null,
     scriptVersion: kv.script_version || null,
     action: kv.action || null,
-    immichServices: (kv.immich || "").split(" ").filter(Boolean)
+    immichServices: (kv.immich || "").split(" ").filter(Boolean),
+    apps: (kv.apps || "").split(" ").filter(Boolean),
+    watchEvery: kv.watch_every ? Number(kv.watch_every) : null
   };
 }
 
@@ -232,7 +244,9 @@ function updaterBusy(state: UpdaterState): boolean {
 const SAFE = /^[A-Za-z0-9._\-/]+$/;
 
 interface UpdaterRequest {
-  action: "update" | "restart" | "immich";
+  action: "update" | "restart" | "immich" | "app_restart";
+  /** app_restart: tên app trong MANAGED_APPS — updater tự tra thư mục + service. */
+  app?: string;
   target?: string;
   /** Bản chụp DB trước cập nhật — updater khôi phục nếu bản mới khởi động lỗi. */
   backup?: string;
@@ -247,7 +261,7 @@ function writeUpdaterRequest(req: UpdaterRequest): string {
   if (updaterBusy(state)) throw new Error("Đang có một lượt cập nhật chạy dở, vui lòng chờ.");
   const id = crypto.randomUUID();
   const lines = [`id=${id}`, `action=${req.action}`];
-  for (const [k, v] of Object.entries({ target: req.target, backup: req.backup, restore: req.restore, script: req.script })) {
+  for (const [k, v] of Object.entries({ target: req.target, backup: req.backup, restore: req.restore, script: req.script, app: req.app })) {
     if (!v) continue;
     if (!SAFE.test(v) || v.includes("..")) throw new Error(`Giá trị không hợp lệ cho ${k}`);
     lines.push(`${k}=${v}`);
@@ -480,6 +494,7 @@ export async function runUpdateTick(now = new Date()): Promise<void> {
   try {
     announceLastResult();
     await announceImmichResult();
+    announceHeals();
     await appTick(now);
     await immichTick(now);
   } catch (e: any) {
@@ -678,4 +693,125 @@ async function immichTick(now: Date): Promise<void> {
       (latest.breaking ? "\n⚠️ Ghi chú phát hành có BREAKING CHANGES — đọc kỹ trước khi cập nhật." : "") +
       `\nĐọc ghi chú: ${latest.url}\nCập nhật trong Family Organizer → Quản lý Server.`
   );
+}
+
+// --- Trông chừng container (updater ≥ v3) -------------------------------------
+// Updater quét container của stack này + các app trong MANAGED_APPS mỗi phút, ghi
+// containers.txt; lỗi chắc chắn (mất mạng / mất cổng / khởi động lỗi) thì tự dựng
+// lại và ghi heal.log. App chỉ đọc + báo Telegram, và gửi app_restart khi admin bấm.
+
+export type ContainerProblem =
+  | "ok"
+  | "no_network"
+  | "no_ports"
+  | "start_failed"
+  | "unhealthy"
+  | "restarting"
+  | "stopped"
+  | string;
+
+export interface ContainerStatus {
+  name: string;
+  project: string | null;
+  service: string | null;
+  status: string;
+  health: string | null;
+  problem: ContainerProblem;
+}
+
+export interface HealEvent {
+  at: number;
+  container: string;
+  problem: string;
+  ok: boolean;
+}
+
+/** Quá 3 chu kỳ không thấy updater ghi lại → coi như số liệu cũ. */
+export function readContainers(): { checkedAt: number | null; stale: boolean; containers: ContainerStatus[] } {
+  let text = "";
+  try {
+    text = fs.readFileSync(CONTAINERS_FILE, "utf8");
+  } catch {
+    return { checkedAt: null, stale: true, containers: [] };
+  }
+  let checkedAt: number | null = null;
+  const containers: ContainerStatus[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith("checked_at=")) checkedAt = Number(line.slice(11)) * 1000 || null;
+    const p = line.split(" ");
+    if (p[0] !== "c" || p.length < 7) continue;
+    containers.push({
+      name: p[1],
+      project: p[2] === "-" ? null : p[2],
+      service: p[3] === "-" ? null : p[3],
+      status: p[4],
+      health: p[5] === "-" ? null : p[5],
+      problem: p[6]
+    });
+  }
+  const every = (readUpdaterState().watchEvery || 60) * 1000;
+  return { checkedAt, stale: !checkedAt || Date.now() - checkedAt > every * 3, containers };
+}
+
+export function readHealEvents(limit = 20): HealEvent[] {
+  try {
+    return fs
+      .readFileSync(HEAL_LOG_FILE, "utf8")
+      .split(/\r?\n/)
+      .map(l => l.split(" "))
+      .filter(p => p.length >= 4 && /^\d+$/.test(p[0]))
+      .map(p => ({ at: Number(p[0]) * 1000, container: p[1], problem: p[2], ok: p[3] === "ok" }))
+      .slice(-limit)
+      .reverse();
+  } catch {
+    return [];
+  }
+}
+
+const PROBLEM_TEXT: Record<string, string> = {
+  no_network: "mất mạng",
+  no_ports: "mất cổng",
+  start_failed: "không khởi động được"
+};
+
+/** Báo Telegram các lần tự sửa mới; sửa hỏng mỗi container chỉ báo 1 lần / 6 giờ (updater còn thử lại). */
+function announceHeals(): void {
+  const events = readHealEvents(50).reverse();
+  const w = getSettings().watch ?? {};
+  // Lần đầu chạy bản này: đặt mốc, không báo dồn lịch sử cũ.
+  if (w.notifiedAt == null) {
+    saveSettings(s => {
+      s.watch = { ...s.watch, notifiedAt: events.length ? events[events.length - 1].at : Date.now() };
+    });
+    return;
+  }
+  if (!events.length) return;
+  const fresh = events.filter(e => e.at > w.notifiedAt!);
+  if (!fresh.length) return;
+  const failNotified = { ...(w.failNotified ?? {}) };
+  const lines: string[] = [];
+  for (const e of fresh) {
+    const what = PROBLEM_TEXT[e.problem] || e.problem;
+    if (e.ok) {
+      lines.push(`🩹 ${e.container} bị ${what} — đã tự dựng lại.`);
+      delete failNotified[e.container];
+    } else if (!failNotified[e.container] || e.at - failNotified[e.container] > 6 * 60 * 60 * 1000) {
+      lines.push(`❌ ${e.container} bị ${what}, tự dựng lại không được — vào Quản lý Server xem chi tiết.`);
+      failNotified[e.container] = e.at;
+    }
+  }
+  saveSettings(s => {
+    s.watch = { notifiedAt: fresh[fresh.length - 1].at, failNotified };
+  });
+  if (lines.length) void notify(`Máy chủ nhà:\n${lines.join("\n")}`);
+}
+
+/** Dựng lại service chính của một app ở stack riêng (tên phải có trong MANAGED_APPS của updater). */
+export function requestAppRestart(app: string): string {
+  const st = readUpdaterState();
+  if (st.alive && Number(st.scriptVersion || 0) < 3) {
+    throw new Error("Dịch vụ cập nhật đang là bản cũ, chưa biết khởi động lại app khác. Cập nhật Family Organizer một lần là có.");
+  }
+  if (st.alive && !st.apps.includes(app)) throw new Error(`Dịch vụ cập nhật không quản lý app "${app}" (thiếu trong MANAGED_APPS).`);
+  return writeUpdaterRequest({ action: "app_restart", app });
 }

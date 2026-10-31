@@ -22,6 +22,7 @@ import { sendWeeklyDigest, runWeeklyDigestTick } from "./server/weeklyDigest.js"
 import { icsFeedToken, isValidIcsToken, buildIcsFeed } from "./server/icsFeed.js";
 import { getVapidPublicKey, isPushConfigured, sendTestPush } from "./server/push.js";
 import { BUILD, checkReleases, getUpdateOverview, requestRestart, runUpdateTick, setAutoUpdate, startUpdate, updateAvailable, compareVersions, checkImmichRelease, getImmichOverview, startImmichUpdate } from "./server/updater.js";
+import { checkAppUpdate, getAppsOverview, managedApps, restartApp, startAppUpdate } from "./server/apps.js";
 
 // Accepted permission roles for write validation
 const VALID_ROLES = new Set<string>([UserRole.ADMIN, UserRole.MEMBER, UserRole.CHILD, UserRole.GUEST]);
@@ -450,6 +451,46 @@ app.post("/api/system/immich/update", requireAuth, requireRole([UserRole.ADMIN])
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message || "Không bắt đầu cập nhật Immich được." });
+  }
+});
+
+// Ứng dụng trong nhà (Car Rental, KidTube… chạy ở stack riêng): trạng thái container do
+// updater trông chừng, cập nhật qua API của chính app đó (HUB_TOKEN), khởi động lại qua updater.
+const appName = (id: string) => managedApps().find(a => a.id === id)?.name || id;
+
+app.get("/api/system/apps", requireAuth, requireRole([UserRole.ADMIN]), async (_req: AuthRequest, res: Response) => {
+  res.json(await getAppsOverview());
+});
+
+app.post("/api/system/apps/:id/check", requireAuth, requireRole([UserRole.ADMIN]), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json(await checkAppUpdate(String(req.params.id)));
+  } catch (err: any) {
+    res.status(502).json({ error: err.message || "Không kiểm tra được bản mới." });
+  }
+});
+
+app.post("/api/system/apps/:id/update", requireAuth, requireRole([UserRole.ADMIN]), async (req: AuthRequest, res: Response) => {
+  const id = String(req.params.id);
+  try {
+    const result = await startAppUpdate(id, req.body?.version ? String(req.body.version) : null);
+    const s = req.userSession!;
+    FamilyDB.logActivity(s.userId, s.username, "Cập nhật app", `${appName(id)}${result.target ? ` → v${result.target}` : ": kéo bản mới nhất"}.`);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || "Không bắt đầu cập nhật được." });
+  }
+});
+
+app.post("/api/system/apps/:id/restart", requireAuth, requireRole([UserRole.ADMIN]), (req: AuthRequest, res: Response) => {
+  const id = String(req.params.id);
+  try {
+    const requestId = restartApp(id);
+    const s = req.userSession!;
+    FamilyDB.logActivity(s.userId, s.username, "Khởi động lại app", `${appName(id)}.`);
+    res.json({ requestId });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || "Không gửi được yêu cầu khởi động lại." });
   }
 });
 

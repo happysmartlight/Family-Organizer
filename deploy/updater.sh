@@ -5,9 +5,11 @@
 # App không tự thay được chính nó, nên việc kéo image mới + khởi động lại
 # giao cho container này. Nó KHÔNG mở cổng mạng: chỉ đọc/ghi file trong
 # <thư mục data của app>/update/ (thư mục chung với app):
-#   request.env   app → updater   id, action (update|restart|immich), target, backup, restore, script
+#   request.env   app → updater   id, action (update|restart|immich|app_restart), target, backup, restore, script, app
 #   state.env     updater → app   heartbeat, phase, result, message, current, previous…
 #   log.txt       nhật ký lần chạy gần nhất
+#   containers.txt  updater → app  trạng thái container của các stack được trông chừng
+#   heal.log      updater → app   các lần tự sửa container (mỗi dòng: giờ tên vấn-đề kết-quả)
 #
 # Cập nhật = đổi $VERSION_VAR trong .env → pull → up -d CHỈ service app → chờ
 # app báo đúng phiên bản. Hỏng → tự quay về bản cũ + khôi phục DB sao lưu
@@ -15,6 +17,13 @@
 # (vd liu-homelab có cả Immich, Home Assistant…) mà không ảnh hưởng service khác.
 # Hành động "immich": pull + up -d các service Immich trong cùng stack (danh sách
 # cố định qua IMMICH_SERVICES, app không chọn được service nào khác).
+# Trông chừng (mỗi WATCH_EVERY giây): container của stack này + các app trong
+# MANAGED_APPS. Chỉ tự sửa (dựng lại bằng compose) lỗi chắc chắn — chạy mà mất
+# mạng/mất cổng, hoặc khởi động không được (vd lúc boot chưa có IP LAN) — khi thấy
+# 2 vòng liền, có giới hạn số lần, và bỏ qua stack đang tự cập nhật. Không đụng
+# container dừng tay.
+# Hành động "app_restart": dựng lại service chính của một app trong MANAGED_APPS
+# (app chỉ gửi tên app, updater tự tra thư mục + service).
 # Viết sh thuần (busybox), không cần jq/curl.
 #
 # Biến môi trường:
@@ -25,10 +34,15 @@
 #   VERSION_VAR  biến trong .env chọn tag image (mặc định FAMILY_ORGANIZER_VERSION)
 #   IMMICH_SERVICES  service Immich được phép cập nhật (mặc định immich-server
 #                immich-machine-learning; chỉ bật nếu stack thật sự có; đặt rỗng để tắt)
+#   MANAGED_APPS app chạy ở stack riêng, cách nhau dấu cách, mỗi app "tên:thư-mục:service"
+#                vd "car-rental:/root/car-rental:car-rental kidtube:/root/kidtube:kidtube".
+#                Thư mục phải được mount vào container này đúng đường dẫn như trên host.
+#   WATCH_EVERY  chu kỳ trông chừng, giây (mặc định 60; 0 = tắt)
+#   HEAL         1 = tự sửa (mặc định), 0 = chỉ báo trạng thái
 # ═══════════════════════════════════════════════════════════════════
 set -u
 
-SCRIPT_VERSION=2
+SCRIPT_VERSION=3
 SELF="$0"
 STACK="${STACK_DIR:?Thiếu STACK_DIR}"
 DATA="${APP_DATA:-$STACK/data}"
@@ -48,6 +62,14 @@ IMMICH_SERVICES="${IMMICH_SERVICES-immich-server immich-machine-learning}"
 # Immich có thể chạy migration DB lâu sau khi lên bản mới.
 IMMICH_HEALTH_TIMEOUT="${IMMICH_HEALTH_TIMEOUT:-900}"
 IMMICH=""
+MANAGED_APPS="${MANAGED_APPS:-}"
+WATCH_EVERY="${WATCH_EVERY:-60}"
+HEAL="${HEAL:-1}"
+SELF_SERVICE="${SELF_SERVICE:-family-organizer-updater}"
+APP_HEALTH_TIMEOUT="${APP_HEALTH_TIMEOUT:-240}"
+CONTAINERS="$UPD/containers.txt"
+HEAL_LOG="$UPD/heal.log"
+WATCH_PREV="$UPD/.watch.prev"
 
 mkdir -p "$UPD"
 chown "$PUID:$PGID" "$UPD" 2>/dev/null || true
@@ -99,7 +121,33 @@ write_state() {
     echo "finished_at=$FINISHED"
     echo "script_version=$SCRIPT_VERSION"
     echo "immich=$IMMICH"
+    echo "apps=$(app_names)"
+    echo "watch_every=$WATCH_EVERY"
   } >"$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$STATE"
+}
+
+# ── App ở stack riêng (MANAGED_APPS) ───────────────────────────────
+app_names() {
+  out=""
+  for a in $MANAGED_APPS; do out="$out${out:+ }${a%%:*}"; done
+  printf '%s' "$out"
+}
+# app_field <tên> <2=thư mục|3=service>
+app_field() {
+  for a in $MANAGED_APPS; do
+    if [ "${a%%:*}" = "$1" ]; then
+      printf '%s' "$a" | cut -d: -f"$2"
+      return 0
+    fi
+  done
+  return 1
+}
+# docker compose trong thư mục stack khác — cd vào để compose tự nhận cả
+# docker-compose.override.yml và .env như khi chạy tay.
+dca() {
+  d="$1"
+  shift
+  (cd "$d" && docker compose "$@")
 }
 
 # Nhịp tim nền trong lúc làm việc lâu (pull image có thể mất vài phút).
@@ -203,6 +251,173 @@ immich_wait() {
     sleep 5
   done
   return 1
+}
+
+# ── Trông chừng container ──────────────────────────────────────────
+# Một lần `docker inspect` cho mọi container; chỉ xét container có nhãn compose
+# thuộc stack này hoặc một app trong MANAGED_APPS.
+WATCH_FMT='{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}|{{.HostConfig.NetworkMode}}|{{len .NetworkSettings.Networks}}|{{range $p, $b := .HostConfig.PortBindings}}{{if $b}}x{{end}}{{end}}|{{range $p, $b := .NetworkSettings.Ports}}{{if $b}}x{{end}}{{end}}|{{if .State.Error}}E{{end}}'
+
+watch_dirs() {
+  printf '%s\n' "$STACK"
+  for a in $MANAGED_APPS; do printf '%s\n' "$a" | cut -d: -f2; done
+}
+
+# problem_of <status> <health> <network_mode> <số network> <cổng khai báo> <cổng đang mở> <lỗi start>
+problem_of() {
+  case "$1" in
+    running)
+      case "$3" in
+        host | none | container:*) ;;
+        *) [ "$4" = 0 ] && { echo no_network; return; } ;;
+      esac
+      [ -n "$5" ] && [ -z "$6" ] && { echo no_ports; return; }
+      [ "$2" = unhealthy ] && { echo unhealthy; return; }
+      echo ok
+      ;;
+    restarting) echo restarting ;;
+    created | exited | dead) if [ -n "$7" ]; then echo start_failed; else echo stopped; fi ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Stack khác đang tự cập nhật bằng updater riêng của nó → không đụng vào.
+stack_busy() {
+  [ "$1" = "$STACK" ] && return 1
+  d="$1/data/update"
+  for f in request.env request.processing request.json; do [ -e "$d/$f" ] && return 0; done
+  grep -Eq '^phase=(prepare|pulling|restoring|restarting|health|rolling_back)$' "$d/state.env" 2>/dev/null && return 0
+  grep -Eq '"phase" *: *"updating"' "$d/state.json" 2>/dev/null && return 0
+  return 1
+}
+
+# Tối đa 1 lần / 5 phút và 6 lần / 6 giờ cho mỗi container — hỏng thật thì để người xem.
+heal_allowed() {
+  [ -f "$HEAL_LOG" ] || return 0
+  awk -v n="$1" -v now="$(date +%s)" '
+    $2 == n { if ($1 > last) last = $1; if (now - $1 < 21600) c++ }
+    END { exit !((now - last >= 300) && (c < 6)) }' "$HEAL_LOG"
+}
+
+# heal <container> <vấn đề> <thư mục stack> <file compose,…> <service>
+heal() {
+  h_name="$1"
+  h_prob="$2"
+  h_wd="$3"
+  h_cfgs="$4"
+  h_svc="$5"
+  rc=0
+  # Luôn dựng lại bằng compose, kể cả khi chỉ là khởi động lỗi: Docker 29 cho
+  # `docker start` lần sau chạy được nhưng KHÔNG có mạng/cổng (đúng lỗi FileBrowser
+  # + Portainer từng gặp). Dựng lại thì mạng + cổng được gắn lại từ đầu.
+  set --
+  old_ifs="$IFS"
+  IFS=,
+  for f in $h_cfgs; do set -- "$@" -f "$f"; done
+  IFS="$old_ifs"
+  missing=""
+  for f in "$@"; do [ "$f" = "-f" ] || [ -f "$f" ] || missing="$f"; done
+  if [ -z "$h_svc" ] || [ "$#" = 0 ] || [ -n "$missing" ]; then
+    h_out="không thấy file compose ${missing:-của $h_name} (thư mục stack chưa được mount vào updater?)"
+    rc=1
+  else
+    h_out="$(docker compose --project-directory "$h_wd" "$@" up -d --no-deps --force-recreate "$h_svc" 2>&1)" || rc=$?
+  fi
+  h_res=ok
+  [ "$rc" = 0 ] || h_res=failed
+  printf '%s %s %s %s\n' "$(date +%s)" "$h_name" "$h_prob" "$h_res" >>"$HEAL_LOG"
+  tail -n 50 "$HEAL_LOG" >"$HEAL_LOG.tmp" && mv -f "$HEAL_LOG.tmp" "$HEAL_LOG"
+  chmod 644 "$HEAL_LOG" 2>/dev/null || true
+  echo "updater: tự sửa $h_name ($h_prob): $h_res"
+  [ "$rc" = 0 ] || printf '%s\n' "$h_out" | tail -n 5
+}
+
+watch_round() {
+  ids="$(docker ps -aq 2>/dev/null)" || return 0
+  dirs="$(watch_dirs)"
+  tmp="$CONTAINERS.tmp.$$"
+  next="$WATCH_PREV.next"
+  echo "checked_at=$(date +%s)" >"$tmp"
+  : >"$next"
+  [ -f "$WATCH_PREV" ] || : >"$WATCH_PREV"
+  # shellcheck disable=SC2086
+  [ -n "$ids" ] && docker inspect -f "$WATCH_FMT" $ids 2>/dev/null | while IFS='|' read -r name proj svc wd cfgs status health netmode nets want have err; do
+    name="${name#/}"
+    printf '%s\n' "$dirs" | grep -qxF "$wd" || continue
+    prob="$(problem_of "$status" "$health" "$netmode" "$nets" "$want" "$have" "$err")"
+    echo "c $name ${proj:--} ${svc:--} $status $health $prob" >>"$tmp"
+    case "$prob" in no_network | no_ports | start_failed) ;; *) continue ;; esac
+    echo "$name:$prob" >>"$next"
+    [ "$HEAL" = 1 ] || continue
+    [ "$svc" = "$SELF_SERVICE" ] && [ "$wd" = "$STACK" ] && continue
+    grep -qxF "$name:$prob" "$WATCH_PREV" || continue
+    stack_busy "$wd" && continue
+    heal_allowed "$name" || continue
+    heal "$name" "$prob" "$wd" "$cfgs" "$svc" </dev/null
+  done
+  mv -f "$next" "$WATCH_PREV"
+  chmod 644 "$tmp" && mv -f "$tmp" "$CONTAINERS"
+}
+
+# Chờ service của một app chạy ổn: healthy (nếu có healthcheck) hoặc running.
+app_wait() {
+  deadline=$(($(date +%s) + APP_HEALTH_TIMEOUT))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    cid="$(dca "$1" ps -q "$2" 2>/dev/null | head -n 1)"
+    if [ -n "$cid" ]; then
+      st="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null)"
+      restarts="$(docker inspect -f '{{.RestartCount}}' "$cid" 2>/dev/null || echo 0)"
+      if [ "${restarts:-0}" -ge 3 ]; then
+        log "$2 khởi động lỗi liên tục ($restarts lần)"
+        return 1
+      fi
+      case "$st" in healthy | running) return 0 ;; esac
+    fi
+    sleep 3
+  done
+  return 1
+}
+
+do_app_restart() {
+  app="$(req_get app)"
+  : >"$LOG"
+  RESULT=""
+  MESSAGE=""
+  FINISHED=""
+  if ! safe "$app" || [ -z "$app" ]; then
+    finish failed "Yêu cầu không hợp lệ" failed
+    return
+  fi
+  dir="$(app_field "$app" 2)" || dir=""
+  svc="$(app_field "$app" 3)" || svc=""
+  if [ -z "$dir" ] || [ -z "$svc" ]; then
+    finish failed "App $app không có trong MANAGED_APPS" failed
+    return
+  fi
+  if [ ! -f "$dir/docker-compose.yml" ] && [ ! -f "$dir/compose.yaml" ]; then
+    finish failed "Không thấy compose của $app trong $dir — thư mục chưa được mount vào updater?" failed
+    return
+  fi
+  if stack_busy "$dir"; then
+    finish failed "$app đang tự cập nhật — chờ xong rồi thử lại" failed
+    return
+  fi
+  PHASE=restarting
+  write_state
+  hb_start
+  log "=== Khởi động lại $app ($svc) ==="
+  if ! dca "$dir" up -d --no-deps --force-recreate "$svc" >>"$LOG" 2>&1; then
+    finish failed "Không khởi động lại được $app — xem nhật ký" failed
+    return
+  fi
+  PHASE=health
+  write_state
+  if app_wait "$dir" "$svc"; then
+    finish ok "Đã khởi động lại $app" done
+  else
+    dca "$dir" logs --tail 30 "$svc" >>"$LOG" 2>&1
+    finish failed "$app chưa chạy ổn sau khi khởi động lại — xem nhật ký" failed
+  fi
 }
 
 finish() {
@@ -367,9 +582,20 @@ if [ -f "$WORK" ]; then
   FINISHED="$(date +%s)"
 fi
 write_state
-echo "updater: sẵn sàng (v$SCRIPT_VERSION), stack $STACK, data $DATA, service $SERVICE${IMMICH:+, immich: $IMMICH}"
+echo "updater: sẵn sàng (v$SCRIPT_VERSION), stack $STACK, data $DATA, service $SERVICE${IMMICH:+, immich: $IMMICH}${MANAGED_APPS:+, apps: $(app_names)}"
+for a in $MANAGED_APPS; do
+  d="$(printf '%s' "$a" | cut -d: -f2)"
+  [ -d "$d" ] || echo "updater: CẢNH BÁO — không thấy thư mục $d của app ${a%%:*} (chưa mount vào container?)"
+done
+# Chạy thử một vòng trông chừng rồi thoát (kiểm tra trên máy thật: WATCH_ONCE=1 HEAL=0).
+if [ -n "${WATCH_ONCE:-}" ]; then
+  watch_round
+  cat "$CONTAINERS"
+  exit 0
+fi
 
 last=0
+last_watch=0
 while :; do
   if [ -f "$REQ" ]; then
     mv -f "$REQ" "$WORK"
@@ -380,6 +606,7 @@ while :; do
       update) do_update ;;
       restart) do_restart ;;
       immich) do_immich ;;
+      app_restart) do_app_restart ;;
       *) log "Bỏ qua yêu cầu lạ: $action" ;;
     esac
     rm -f "$WORK"
@@ -390,6 +617,11 @@ while :; do
   if [ $((now - last)) -ge 10 ]; then
     write_state
     last="$now"
+  fi
+  # Trông chừng chỉ chạy lúc rảnh — đang cập nhật thì container lên xuống là bình thường.
+  if [ "$WATCH_EVERY" -gt 0 ] && [ $((now - last_watch)) -ge "$WATCH_EVERY" ]; then
+    watch_round
+    last_watch="$(date +%s)"
   fi
   sleep 2
 done

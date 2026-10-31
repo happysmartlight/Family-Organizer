@@ -3,6 +3,19 @@
 Ghi theo phiên bản, mới nhất ở trên. Nội dung mục của từng phiên bản được dùng làm ghi chú
 hiển thị trong **Thiết lập → Hệ thống & Sao lưu → Phiên bản & Cập nhật**.
 
+## [1.2.0] - 2026-10-31
+
+### Mới
+- **Ứng dụng trong nhà** (tab **Quản lý Server**, chỉ Admin): Family Organizer giờ là nơi điều khiển chung cho các app khác chạy trên máy chủ nhà — **Car Rental** và **KidTube**.
+  - Xem từng app đang chạy hay lỗi, đang ở bản nào, có bản mới không (KidTube hiện luôn danh sách thay đổi mới).
+  - Bấm **Cập nhật** ngay tại đây — app đó vẫn tự sao lưu và tự quay về bản cũ nếu lỗi, y như khi cập nhật trong chính nó. KidTube báo trước nếu có bé đang xem.
+  - Bấm **Khởi động lại** khi một app bị treo hay không vào được — làm được cả khi app đó không phản hồi.
+  - Nút **Mở** để vào thẳng app.
+- **Máy chủ tự trông chừng**: mỗi phút kiểm tra mọi container của nhà (Immich, Car Rental, KidTube, FileBrowser…). Container nào chạy mà mất mạng/mất cổng, hoặc không khởi động được sau khi mất điện, sẽ được tự dựng lại và báo qua Telegram. Danh sách container và các lần tự sửa gần đây hiện trong thẻ **Ứng dụng trong nhà**.
+
+### Ghi chú
+- Dịch vụ cập nhật tự nâng cấp ngay sau khi lên bản này. Để điều khiển được Car Rental và KidTube, cần chạy lại `setup.sh` của liu-homelab trên Pi một lần và cập nhật mỗi app một lần trong chính app đó.
+
 ## [1.1.0] - 2026-10-09
 
 ### Mới

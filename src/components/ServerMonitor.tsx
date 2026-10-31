@@ -8,6 +8,7 @@ import { Cpu, Thermometer, MemoryStick, HardDrive, Server, Clock, AlertTriangle,
 import { ShimmerLine, Reveal, IconChip, Accent } from "./Lively.js";
 import { User, UserRole } from "../types.js";
 import { ImmichUpdateCard } from "./ImmichUpdateCard.js";
+import { HomelabAppsCard } from "./HomelabAppsCard.js";
 import { useTranslation } from "react-i18next";
 
 // Client chỉ tải dữ liệu 1 phút/lần (server cũng tự ghi telemetry 1 phút/lần
@@ -718,6 +719,9 @@ export function ServerMonitor({ authHeaders, currentUser }: ServerMonitorProps) 
           )}
         </Reveal>
       )}
+
+      {/* ─── Ứng dụng trong nhà: Car Rental, KidTube… + container được trông chừng (admin) ─── */}
+      {isAdmin && <HomelabAppsCard authHeaders={authHeaders} delay={0.27} />}
 
       {/* ─── Cập nhật Immich (admin; ẩn nếu stack không có Immich) ─── */}
       {isAdmin && <ImmichUpdateCard authHeaders={authHeaders} delay={0.28} />}
